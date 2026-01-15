@@ -822,7 +822,7 @@ class Step1CrewFactory:
             agents=list(workers.values()),
             tasks=[tasks[t] for t in task_order],
             process=Process.sequential,  # hierarchical → sequential
-            verbose=True,
+            verbose=False,  # 커스텀 ProgressTracker 사용, CrewAI 기본 출력 끔
             step_callback=step_callback,
             task_callback=task_callback,
         )
@@ -872,7 +872,7 @@ class Step1CrewFactory:
             agents=list(workers.values()),
             tasks=[tasks[t] for t in task_order],
             process=Process.sequential,  # hierarchical → sequential
-            verbose=True,
+            verbose=False,  # 커스텀 ProgressTracker 사용, CrewAI 기본 출력 끔
             step_callback=step_callback,
             task_callback=task_callback,
         )
