@@ -577,6 +577,91 @@ def _get_task_output_by_name(crew, task_name_pattern: str) -> str:
     return ""
 
 
+# ============================================================================
+# 후속 대화 기능 (리포트에 대한 Q&A)
+# ============================================================================
+
+def _start_report_chat(report_text: str, inputs: Dict[str, Any]) -> None:
+    """
+    리포트 완료 후 사용자와 대화하는 모드.
+    사용자가 리포트에 대해 질문하거나 반론(Claim)을 제기하면 LLM이 답변한다.
+    """
+    try:
+        from crewai import LLM
+    except ImportError:
+        print("⚠️ CrewAI LLM을 불러올 수 없습니다. 대화 모드를 종료합니다.")
+        return
+    
+    # LLM 초기화 (main 모델 사용)
+    model = os.getenv("MAIN_LLM_MODEL", "gpt-4.1")
+    llm = LLM(model=model)
+    
+    # 시스템 프롬프트 구성
+    idea = inputs.get("idea_one_liner", "N/A")
+    target = inputs.get("target_customer", "N/A")
+    
+    system_prompt = f"""당신은 시장검증 리포트에 대해 토론하는 전문 컨설턴트입니다.
+
+[아이디어 배경]
+- 아이디어: {idea}
+- 타깃 고객: {target}
+
+[리포트 내용]
+{report_text[:8000]}  # 토큰 제한을 위해 앞부분만
+
+[역할]
+- 사용자가 리포트에 대해 질문하면 명확하게 답변하세요.
+- 사용자가 반론(Claim)을 제기하면:
+  1. 먼저 그 관점을 인정하고
+  2. 리포트의 근거와 비교 분석하고
+  3. 가능하다면 새로운 시각을 제시하세요.
+- 사용자의 관점이 타당하면 인정하고, 리포트 결론 수정을 제안할 수도 있습니다.
+- 항상 한국어로 답변하세요.
+- 답변은 간결하게 (3-5문단 이내).
+"""
+    
+    conversation_history = [{"role": "system", "content": system_prompt}]
+    
+    print("\n" + "=" * 60)
+    print("💬 리포트 후속 대화 모드")
+    print("=" * 60)
+    print("리포트에 대해 궁금한 점이나 반론이 있으면 자유롭게 말씀하세요.")
+    print("종료하려면 'quit', 'exit', 또는 '종료'를 입력하세요.")
+    print("=" * 60 + "\n")
+    
+    while True:
+        try:
+            user_input = input("📝 나: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n\n대화를 종료합니다. 감사합니다! 👋")
+            break
+        
+        if not user_input:
+            continue
+        
+        if user_input.lower() in ["quit", "exit", "q", "종료", "끝", "나가기"]:
+            print("\n대화를 종료합니다. 감사합니다! 👋")
+            break
+        
+        # 대화 히스토리에 추가
+        conversation_history.append({"role": "user", "content": user_input})
+        
+        # LLM 호출
+        try:
+            response = llm.call(messages=conversation_history)
+            
+            # 응답을 히스토리에 추가
+            conversation_history.append({"role": "assistant", "content": response})
+            
+            print(f"\n🤖 AI: {response}\n")
+            
+        except Exception as e:
+            print(f"\n⚠️ 응답 생성 중 오류: {e}")
+            print("   다시 시도해주세요.\n")
+            # 실패한 메시지는 히스토리에서 제거
+            conversation_history.pop()
+
+
 def _load_pass1_outputs_for_revision(out_dir: Path, run_id_pass1: str) -> Dict[str, str]:
     """
     Pass1 outputs에서 revision에 필요한 파일들을 읽어온다.
@@ -698,6 +783,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="운영급 안전 모드: context 크기가 임계치를 넘으면 자동 축소. "
              "TPM 에러 방지를 위한 추가 가드레일 적용.",
+    )
+    
+    # 후속 대화 모드
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="리포트 생성 후 후속 대화 모드 시작. "
+             "리포트에 대해 질문하거나 반론(Claim)을 제기하면 AI가 답변합니다.",
     )
 
     args = parser.parse_args(argv)
@@ -992,6 +1085,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     
     _safe_write_text(out_path, final_text_with_header)
     print(f"\n✅ Final report saved to: {out_path}")
+
+    # 9) 후속 대화 모드 (--chat)
+    if args.chat:
+        _start_report_chat(final_text, inputs)
 
     return 0
 
