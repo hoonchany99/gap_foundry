@@ -1,0 +1,26 @@
+# 환경 변수
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 실행 결과물 (로컬에서만 유지)
+outputs/runs/
+outputs/reports/
+
+# 임시 파일
+*.log
+*.tmp

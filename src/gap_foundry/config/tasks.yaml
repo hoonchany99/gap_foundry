@@ -1,0 +1,670 @@
+discover_competitors:
+  description: >
+    입력 아이디어를 기반으로 직접/간접 경쟁사 및 대체재를 최소 15개 발굴한 뒤,
+    최종 분석 대상 상위 8~10개를 추천하라.
+
+    [핵심 원칙]
+    - "없다"는 결론을 쉽게 내리지 말고, 해외 사례/대체재/워크어라운드까지 폭넓게 찾는다.
+    - 각 후보가 왜 유사한지(문제/타깃/행동/가치제안 중 무엇이 겹치는지)를 한 문장으로 명확히 써라.
+    - 추측 금지: 확인하지 못한 내용은 "추정"으로 표시하거나 제외한다.
+
+    [입력]
+    아이디어: {idea_one_liner}
+    타깃: {target_customer}
+    문제: {problem_statement}
+    현재 대안: {current_alternatives}
+    시장: {geo_market} / {business_type}
+    제약: {constraints}
+
+    [분류 기준]
+    - Direct: 같은 타깃+같은 문제를 같은 방식으로 해결
+    - Indirect: 같은 문제를 다른 방식으로 해결(또는 인접 타깃)
+    - Substitute: 고객이 지금 실제로 쓰는 대체 행동/도구/서비스
+
+  expected_output: >
+    아래 JSON을 마크다운 코드블록으로 출력하라. (반드시 JSON 유효)
+    - items는 8~10개(최종 분석 대상)
+    - candidates는 15~30개(풀 리스트; 간단히)
+    - 모든 항목에 url은 "필수" (공식 사이트/앱스토어/제품 페이지/소개 페이지 중 하나)
+    - why_similar는 1문장, keywords는 3~8개
+    {
+      "items": [
+        {
+          "name": "string",
+          "type": "Direct|Indirect|Substitute",
+          "why_similar": "string",
+          "keywords": ["string"],
+          "url": "https://...",
+          "notes": "string"
+        }
+      ],
+      "candidates": [
+        {"name":"string","type":"Direct|Indirect|Substitute","url":"https://...","keywords":["string"]}
+      ],
+      "search_terms_used": ["string"]
+    }
+  agent: competitor_discovery
+
+# ============================================================================
+# Context 압축 태스크 (TPM 관리의 핵심)
+# ============================================================================
+
+compact_competitors:
+  description: >
+    discover_competitors 결과에서 downstream 분석에 필요한 최소 정보만 남겨라.
+    
+    [압축 규칙]
+    - items(상위 8~10개)의 name/type/url/keywords/why_similar만 유지
+    - candidates, search_terms_used, notes 등은 제거하거나 1줄로 요약
+    - 출력은 반드시 1KB~2KB 이내로 제한하라
+    - 불필요한 상세 설명, 중복 정보는 과감히 제거
+    
+    [왜 이게 필요한가]
+    - 다음 단계(채널 분석, VP 추출)가 이 압축본을 참조함
+    - raw 결과를 그대로 넘기면 토큰이 폭발함
+    
+  expected_output: >
+    아래 JSON을 마크다운 코드블록으로 출력하라:
+    ```json
+    {
+      "competitors_summary": "전체 경쟁 구도 1~2문장 요약",
+      "items": [
+        {
+          "name": "경쟁사명",
+          "type": "Direct|Indirect|Substitute",
+          "url": "https://...",
+          "keywords": ["키워드1", "키워드2"],
+          "why_similar": "유사 이유 1문장"
+        }
+      ],
+      "key_patterns": "경쟁사들의 공통 패턴 1~2문장"
+    }
+    ```
+  agent: competitor_discovery
+  context:
+    - discover_competitors
+
+# ============================================================================
+# 채널/VP 분석 (compact_competitors 기반)
+# ============================================================================
+
+analyze_channels:
+  description: >
+    discover_competitors의 items(상위 8~10개)를 대상으로
+    "그들은 어떻게 고객에게 닿는가"를 채널 중심으로 분석하라.
+
+    [⚠️ 토큰 절약 - 필수 준수]
+    - **한 번에 최대 3개 경쟁사만 스크래핑하라.** 나머지는 검색 결과 snippet으로 분석.
+    - 스크래핑 시 **페이지 상단 400자 이내**만 읽어라. 전체 페이지를 읽지 마라.
+    - 검색만으로 충분한 정보가 있으면 스크래핑을 생략하라.
+
+    [출력 제한 - 반드시 준수]
+    - **competitor당 channels 최대 2개만** (가장 중요한 채널만)
+    - **각 array(message_patterns, audience_callout 등)는 최대 3개씩만**
+    - **notes는 1줄(30자) 이내 또는 생략**
+    - **전체 items는 최대 5개** (중요도 순)
+
+    [분석 범위]
+    - 채널 후보: 검색(SEO/SEM), 유튜브, 인스타, 틱톡, 블로그, 뉴스레터, 커뮤니티, 파트너십, 마켓플레이스 등
+    - 각 채널에서 반복되는 메시지/후킹/CTA 패턴을 뽑아라.
+    - "어떤 고객을 호명하는지"를 반드시 추출하라.
+
+    [중요]
+    - 스크래핑/검색 결과에서 확인한 사실만 쓰고, 추측은 "추정"으로 표시.
+    - 메시지는 그대로 복붙이 아니라 "요약+패턴화" 하라.
+
+  expected_output: >
+    아래 JSON을 마크다운 코드블록으로 출력하라. (반드시 JSON 유효)
+    - items는 최대 5개
+    - channels는 competitor당 최대 2개
+    - 각 array는 최대 3개씩
+    {
+      "items": [
+        {
+          "competitor": "string",
+          "channels": [
+            {
+              "channel_type": "string",
+              "message_patterns": ["max 3"],
+              "audience_callout": ["max 3"],
+              "emotion_triggers": ["max 3"],
+              "cta_patterns": ["max 3"]
+            }
+          ]
+        }
+      ],
+      "cross_competitor_patterns": {
+        "most_common_channels": ["max 3"],
+        "common_hooks": ["max 3"],
+        "common_ctas": ["max 3"],
+        "common_emotions": ["max 3"]
+      }
+    }
+  agent: channel_intel
+  context:
+    - compact_competitors  # 슬림한 경쟁사 정보만 참조 (TPM 최적화)
+
+extract_value_props:
+  description: >
+    discover_competitors의 items(상위 8~10개)에 대해
+    랜딩/상세 페이지 관점에서 핵심 가치제안(카피/기능/증거/가격/마찰)을 분해하라.
+
+    [⚠️ 토큰 절약 - 필수 준수]
+    - **한 번에 최대 3개 경쟁사만 스크래핑하라.** 나머지는 이전 태스크 결과에서 추론.
+    - 스크래핑 시 **페이지 상단 400자 이내**만 분석. 전체 페이지를 읽지 마라.
+    - 스크래핑이 실패하거나 너무 길면 **검색 결과의 snippet만으로 분석**하라.
+
+    [출력 제한 - 반드시 준수]
+    - **전체 items는 최대 5개** (중요도 순)
+    - **features 최대 5개**, proofs 각 카테고리 최대 2개
+    - **notes는 1줄(30자) 이내 또는 생략**
+    - **hero_copy_original은 20단어 이내**
+    - **sub_copy_summary, audience_definition, friction은 각 최대 3개**
+
+    [노이즈 줄이기 지시]
+    - 페이지 전체를 요약하지 말고, "Hero(상단)" 중심으로 추출한다.
+    - Hero copy 후보는 원문 문구를 짧게 인용(최대 20단어).
+    - USP 후보는 "여기만 말하는 제안"을 1~2개로 태깅한다.
+    - 가격/플랜이 없으면 "not_found"로 표기하고 넘어가라.
+
+    [검증 관점]
+    - "누구에게"를 페이지에서 어떻게 특정하는지 추출한다.
+    - 마찰(friction)은 핵심 2개만 적는다.
+
+  expected_output: >
+    아래 JSON을 마크다운 코드블록으로 출력하라. (반드시 JSON 유효)
+    - items 최대 5개
+    - 각 array 최대 3개 (proofs는 각 2개)
+    - notes 생략 또는 1줄
+    {
+      "items": [
+        {
+          "competitor": "string",
+          "hero_copy_original": "max 20 words",
+          "hero_copy_summary": "1줄 요약",
+          "audience_definition": ["max 3"],
+          "usp_candidates": ["max 2"],
+          "features": ["max 5"],
+          "proofs": {
+            "numbers": ["max 2"],
+            "logos": ["max 2"]
+          },
+          "pricing": "string or not_found",
+          "friction": ["max 3"]
+        }
+      ],
+      "vp_comparison_matrix": {
+        "common_promises": ["max 3"],
+        "common_frictions": ["max 3"]
+      }
+    }
+  agent: vp_extractor
+  context:
+    - compact_competitors  # 슬림한 경쟁사 정보만 참조 (TPM 최적화)
+
+mine_gaps:
+  description: >
+    summarize_channels_vp(압축된 채널/VP 정보)만 근거로 삼아
+    경쟁사가 해결하지 못했거나 새로 만든 부작용/불만을 바탕으로
+    빈틈 가설 8~15개를 생성하라.
+
+    [⚠️ 중요: 데이터 소스 제한]
+    - 이 태스크는 summarize_channels_vp만 참조하라
+    - raw 출력(analyze_channels, extract_value_props 원본)을 직접 추측하지 마라
+    - 주어진 압축 데이터에서 관찰된 사실만 근거로 사용하라
+
+    [빈틈 가설 작성 규칙]
+    - 반드시 "특정 고객 세그먼트"와 "특정 순간(moment)"을 포함해야 한다.
+    - gap_type은 아래 taxonomy 중 하나로 라벨링:
+      비용/수수료/의존, 과기능/복잡함, 러닝커브, 세그먼트 소외, 신뢰/품질, 워크플로우 단절,
+      속도/즉시성, 커스터마이징 부족, 데이터/보안, 운영 부담, 결과 일관성, 기타
+    - insight는 "왜 기존 대안이 부족한지"를 경쟁사 관찰 근거로 논리적으로 작성한다.
+    - validation_signals는 반드시 포함:
+      * 고객이 실제로 검색할 법한 키워드 2~5개
+      * 커뮤니티/리뷰에서 나올 법한 불만 문장 2~4개(가상 가능하지만 '가상' 표기)
+    - proposed_angle은 STEP2 카피로 이어질 수 있게 "한 문장 제안"으로 써라.
+
+  expected_output: >
+    아래 JSON을 마크다운 코드블록으로 출력하라. (반드시 JSON 유효)
+    - items 8~15개
+    {
+      "items": [
+        {
+          "id": "GAP-001",
+          "target_segment": "string",
+          "moment": "string",
+          "gap_type": "string",
+          "insight": "string",
+          "validation_signals": {
+            "search_keywords": ["string"],
+            "community_phrases": ["string"]
+          },
+          "proposed_angle": "string",
+          "which_competitors_triggered": ["string"]
+        }
+      ],
+      "top_gap_types": ["string"],
+      "notes": "string"
+    }
+  agent: gap_miner
+  context:
+    - summarize_channels_vp  # 압축된 채널/VP 정보만 참조 (TPM 최적화)
+
+# ============================================================================
+# SUMMARIZE CHANNELS + VP - mine_gaps context 슬림화 (가드레일 #3)
+# ============================================================================
+
+summarize_channels_vp:
+  description: >
+    analyze_channels와 extract_value_props 결과를 mine_gaps 용도로만 압축하라.
+    
+    [⚠️ 하드 제한 - 반드시 준수]
+    - **competitors는 최대 5개만 포함하라.**
+    - **message_patterns/usp_or_promise/frictions 등 배열은 각 최대 3개.**
+    - **각 문자열은 120자 이내. 초과 시 잘라라.**
+    - 전체 출력은 1200자 이내로 제한하라.
+    
+    [압축 규칙]
+    - competitor별로 아래만 남겨라:
+      1) audience 요약 1줄 (120자 이내)
+      2) message_patterns 3개 (각 120자 이내)
+      3) usp_or_promise 2개 (각 120자 이내)
+      4) pricing 1줄 (없으면 "not_found")
+      5) frictions 2개 (각 120자 이내)
+    - hero_copy 전문, proofs 상세, URL, 긴 인용문은 모두 버려라
+    
+    [왜 필요한가]
+    - 다음 단계(gap_miner)가 이 압축본만 참조함
+    - mine_gaps에 필요한 건 "근거가 되는 관찰"이지, 페이지 카피 전문이 아님
+    
+  expected_output: >
+    아래 JSON 형식으로 출력하라 (1200자 이내):
+    ```json
+    {
+      "competitors": [
+        {
+          "name": "경쟁사명",
+          "audience": "타깃 호명 1줄",
+          "message_patterns": ["패턴1", "패턴2", "패턴3"],
+          "usp_or_promise": ["USP1", "USP2"],
+          "pricing": "가격 핵심 또는 not_found",
+          "frictions": ["마찰1", "마찰2"]
+        }
+      ],
+      "cross_patterns": {
+        "common_audiences": ["공통 타깃1", "공통 타깃2"],
+        "common_hooks": ["공통 후킹1", "공통 후킹2", "공통 후킹3"],
+        "common_emotions": ["감정1", "감정2"],
+        "common_frictions": ["공통 마찰1", "공통 마찰2"]
+      }
+    }
+    ```
+  agent: research_summarizer
+  context:
+    - analyze_channels
+    - extract_value_props
+
+# ============================================================================
+# SUMMARIZE RESEARCH - orchestrator context 슬림화
+# ============================================================================
+
+summarize_research:
+  description: >
+    지금까지의 모든 리서치 결과(경쟁사, 채널, VP, Gap 가설)를
+    의사결정에 필요한 핵심 내용만 1~2페이지로 압축하라.
+    
+    [목적]
+    - orchestrator(최종 판단자)가 전체 리서치를 빠르게 이해할 수 있게
+    - 토큰 사용량 최적화 (상세 데이터 대신 요약본 전달)
+
+    [요약 범위 - 반드시 포함]
+    1) 경쟁사 핵심 요약:
+       - Direct 경쟁사 Top 5 (이름, URL, 핵심 차별점 1문장)
+       - 주요 대체재 Top 3 (이름, 왜 대체재인지 1문장)
+    
+    2) 채널/메시지 패턴:
+       - 가장 효과적인 채널 Top 3
+       - 공통 후킹/CTA 패턴 3개
+       - 공통 감정 트리거 2~3개
+    
+    3) 가치제안(VP) 핵심:
+       - 공통 약속(Promise) 패턴 3개
+       - 차별화 포인트 패턴 3개
+       - 공통 마찰(Friction) 3개
+    
+    4) Gap 가설 Top 5:
+       - id, target_segment, gap_type, insight(1문장), proposed_angle
+       - 검증 키워드 2~3개씩
+
+    [출력 제한]
+    - 전체 1,500~2,000 토큰 이내
+    - 불필요한 디테일, 중복, 예시는 과감히 생략
+    - 패턴/인사이트/결론 중심
+
+  expected_output: >
+    아래 구조의 마크다운:
+    ## Research Summary for Decision Making
+    
+    ### 1. 경쟁사 핵심 (Direct 5 + 대체재 3)
+    | 유형 | 이름 | URL | 핵심 차별점 |
+    ...
+    
+    ### 2. 채널/메시지 패턴
+    - Top 채널: ...
+    - 공통 후킹: ...
+    - 감정 트리거: ...
+    
+    ### 3. VP 핵심
+    - 공통 약속: ...
+    - 차별화 포인트: ...
+    - 공통 마찰: ...
+    
+    ### 4. Gap 가설 Top 5
+    | id | 세그먼트 | 유형 | 인사이트 | 검증 키워드 |
+    ...
+    
+    ### 5. 핵심 시사점 (3문장)
+    - ...
+    
+  agent: research_summarizer
+  context:
+    - compact_competitors  # 슬림한 경쟁사 정보
+    - summarize_channels_vp  # 압축된 채널/VP 정보
+    - mine_gaps
+
+create_pov_and_positioning:
+  description: >
+    mine_gaps의 빈틈 가설을 바탕으로,
+    "우리만의 관점(POV)" 2~3개와
+    차별화 가치제안(포지셔닝) 3안을 만들어라.
+
+    [각 포지셔닝 옵션 필수 요소]
+    - POV 1문장: "우리는 시장을 이렇게 본다"
+    - 핵심 타깃/상황: "누구의 어떤 순간"
+    - Promise(약속) 1문장: 결과/효과를 구체적으로(가능하면 수치/비율/시간)
+    - Reasons to Believe: 근거/메커니즘/차별화 포인트 3개
+    - Feature Focus:
+      * must_have 3~5개
+      * should_have 2~4개
+      * will_not_do 2~4개 (범위 관리)
+    - 경쟁 대안 대비 비교 메시지 2~3개(너무 공격적 문구 말고 명확한 차이)
+    - STEP2 Hero 카피 초안 5개(모호한 표현 금지)
+
+    [품질 조건]
+    - 빈틈 가설의 validation_signals를 참조해 "실제 표현"과 연결하라.
+    - 단순한 기능 나열이 아니라, 관점 → 제안 → 기능이 자연스럽게 이어져야 한다.
+
+  expected_output: >
+    아래 마크다운으로 출력하라:
+    - Option A/B/C로 구분
+    - 각 Option마다 위 필수 요소를 섹션으로 포함
+    - 마지막에 "추천 Option(1개)"과 "왜 이게 가장 설득력 있는지"를 5줄 이내로 요약
+  agent: pov_strategist
+  context:
+    - summarize_research  # 요약본 기반으로 POV 생성 (토큰 최적화)
+
+red_team_review:
+  description: >
+    create_pov_and_positioning까지의 전체 산출물을 공격적으로 검토하라.
+    목표는 "겸손"을 강제하고, 근거 없는 주장/재포장/복제 가능성을 제거하는 것이다.
+
+    ⚠️ 중요: 새로운 조사/확장은 하지 말고, 주어진 산출물만 비판하라.
+    너는 "검토자"이지 "리서처"가 아니다. 추가 검색/스크래핑 금지.
+
+    [필수 체크리스트]
+    1) 재포장/차별화 약함: 경쟁사와 비교했을 때 정말 '다른가'?
+    2) 시장이 너무 작거나 타이밍이 빠름: '왜 지금'이 성립하는가?
+    3) 복제 가능성: 강자가 1~2분기 내로 따라하면 끝나는가?
+    4) 특정 고객 가치: "누구에게 왜 가치인지"가 검증 신호와 연결되는가?
+    5) 경쟁사 누락: 유사 카테고리/대체재가 빠졌을 가능성?
+    6) POV의 일관성: 관점이 기능/카피까지 일관되게 이어지는가?
+
+    [출력 규칙]
+    - Critical Issues 최소 7개
+    - 각 이슈마다: 문제 설명 → 근거 → 수정안(구체적) → 검증 질문 1개
+    - "가장 위험한 가정 Top 3"를 뽑아라.
+    
+    ⚠️ VERDICT 출력 규칙 (반드시 준수):
+    - 반드시 **마지막 줄**에 "VERDICT: PASS" 또는 "VERDICT: FAIL"만 출력하라.
+    - VERDICT 라인 뒤에 어떤 글도, 공백도, 줄바꿈도 쓰지 마라.
+    - 형식: VERDICT: PASS 또는 VERDICT: FAIL (콜론 뒤 공백 1개)
+      - PASS: 치명적 결함 없이 진행 가능 (다음 STEP으로)
+      - FAIL: 현재 형태로는 진행 불가 (구조적 문제 있음)
+
+    [FAIL일 경우 필수 추가 섹션]
+    FAIL 판정 시, 반드시 아래 섹션을 포함하라:
+
+    ## [PRIMARY REASON]
+    왜 이 아이디어는 지금 형태로는 성립하지 않는가? (핵심 1문장)
+
+    ## [IF YOU STILL WANT TO PURSUE THIS PROBLEM]
+    이 "문제 영역"을 계속 잡고 싶다면 고려할 수 있는 방향 (최대 3개):
+    - Salvage Option 1: (같은 문제, 다른 세그먼트) - 왜 이게 더 나은지 근거
+    - Salvage Option 2: (같은 문제, 다른 타이밍/사용 맥락) - 왜 이게 더 나은지 근거
+    - Pivot Option: (핵심 가정 포기, 문제 재정의) - 언제 이걸 선택해야 하는지
+
+    ※ 이건 브레인스토밍이 아니라 "의사결정용 처방전"이다.
+    ※ 각 옵션은 gap 분석과 경쟁사 데이터에 근거해야 한다.
+
+  expected_output: >
+    red_team.md 형태의 마크다운:
+    - Critical Issues (>=7)
+    - Suggested Fixes
+    - Open Questions
+    - Risky Assumptions Top 3
+    - **VERDICT: PASS 또는 VERDICT: FAIL**
+    
+    [FAIL인 경우 추가]
+    - PRIMARY REASON
+    - IF YOU STILL WANT TO PURSUE THIS PROBLEM (Salvage Options)
+  agent: red_team
+  context:
+    - create_pov_and_positioning
+
+# ============================================================================
+# Revision 태스크 (--auto-revise 시에만 실행)
+# ============================================================================
+
+revise_positioning:
+  description: >
+    red_team_review의 Critical Issues와 Suggested Fixes를 반영하여
+    create_pov_and_positioning의 Option A/B/C를 개선한 v2를 작성하라.
+
+    ═══════════════════════════════════════════════════════════════
+    [이전 포지셔닝 분석 결과]
+    ═══════════════════════════════════════════════════════════════
+    {previous_positioning_output}
+
+    ═══════════════════════════════════════════════════════════════
+    [Red Team 피드백 - 반드시 반영해야 함]
+    ═══════════════════════════════════════════════════════════════
+    {previous_red_team_output}
+
+    ═══════════════════════════════════════════════════════════════
+    [수정 규칙]
+    - red_team이 지적한 "치명적 이슈" 상위 3개를 반드시 반영
+    - 각 Option별로 "무엇을 어떻게 수정했는지" 수정 로그를 포함
+    - 기존 구조(POV/Promise/RTB/Feature Focus/카피 초안)를 유지하되, 내용을 개선
+    - 새로운 근거/검증 신호가 필요하면 추가
+
+    [중요]
+    - "단순 표현 수정"이 아니라 "구조적 개선"을 목표로 하라
+    - red_team이 "왜 지금?"을 지적했다면, 타이밍 근거를 추가하라
+    - "차별화 약함"을 지적했다면, 경쟁사 대비 명확한 차이를 구체화하라
+
+    [필수] 수정 후에도 남아있는 리스크/가정 3개를 명시하라
+    - v2가 "예쁘게 고친 것처럼 보이는데, 핵심 가정은 그대로"인 경우를 방지
+    - 각 리스크/가정에 대해: 무엇인지 + 왜 아직 해결 안 됐는지 + 검증 방법 제안
+
+  expected_output: >
+    positioning_options_v2.md 형태의 마크다운:
+    - Option A/B/C (개선된 버전)
+    - 각 Option별 수정 로그: [수정 전] → [수정 후] + 근거
+    - 추천 Option 재선정 (변경 시 이유 명시)
+    - **[REMAINING RISKS] 수정 후에도 남아있는 리스크/가정 Top 3**
+  agent: pov_strategist
+  # revision-only 실행 시: context 대신 inputs로 이전 결과 주입
+  # 전체 실행 시: context가 비어있어도 CrewAI가 이전 태스크 결과 자동 참조
+  context: []
+
+red_team_recheck:
+  description: >
+    revise_positioning(v2)을 다시 검토하고, 최종 PASS/FAIL을 판정하라.
+
+    ⚠️ 중요: 새로운 조사/확장은 하지 말고, 주어진 산출물만 비판하라.
+    너는 "검토자"이지 "리서처"가 아니다. 추가 검색/스크래핑 금지.
+
+    [검토 관점]
+    - 이전 red_team_review에서 지적한 Critical Issues가 해결되었는가?
+    - 새로운 치명적 문제가 생기지 않았는가?
+    - 수정이 "표면적"이 아니라 "실질적"인가?
+
+    [출력 규칙]
+    - 이전 이슈별 해결 여부: ✅ 해결 / ⚠️ 부분 해결 / ❌ 미해결
+    - 새로운 이슈가 있다면 추가
+    
+    ⚠️ VERDICT 출력 규칙 (반드시 준수):
+    - 반드시 **마지막 줄**에 "VERDICT: PASS" 또는 "VERDICT: FAIL"만 출력하라.
+    - VERDICT 라인 뒤에 어떤 글도, 공백도, 줄바꿈도 쓰지 마라.
+    - 형식: VERDICT: PASS 또는 VERDICT: FAIL (콜론 뒤 공백 1개)
+
+    [FAIL일 경우] - 2차 시도에서도 FAIL이면, 더 이상 같은 방향 수정은 의미 없음
+    - PRIMARY REASON: 왜 수정으로도 해결이 안 되는가
+    - FINAL SALVAGE RECOMMENDATION: 
+      red_team_review에서 제시한 Salvage Options 중 가장 현실적인 1개만 다시 강조
+      "이 방향으로 가려면, STEP1을 처음부터 다시 시작하세요"
+
+  expected_output: >
+    red_team_v2.md 형태의 마크다운:
+    - Previous Issues Resolution Status (각 이슈별 ✅/⚠️/❌)
+    - New Issues (있다면)
+    - Final Assessment
+    - **VERDICT: PASS 또는 VERDICT: FAIL**
+    
+    [FAIL인 경우 추가]
+    - PRIMARY REASON
+    - FINAL SALVAGE RECOMMENDATION (1개만)
+  agent: red_team
+  context:
+    - revise_positioning
+
+final_step1_report:
+  description: >
+    모든 결과물을 통합하여 STEP1 최종 리포트를 작성하라.
+
+    ═══════════════════════════════════════════════════════════════
+    [Revision-only 실행 시 참조할 이전 결과]
+    ═══════════════════════════════════════════════════════════════
+    (아래 내용이 비어있으면 무시하고, context에서 참조하라)
+
+    [리서치 요약]
+    {research_summary}
+
+    [빈틈 가설]
+    {gap_hypotheses}
+
+    ═══════════════════════════════════════════════════════════════
+    ⚠️ VERDICT 우선순위 규칙 (반드시 준수)
+    ═══════════════════════════════════════════════════════════════
+    - red_team_recheck 결과가 있으면: red_team_recheck의 VERDICT를 기준으로 삼아라.
+    - red_team_recheck 결과가 없으면: red_team_review의 VERDICT를 기준으로 삼아라.
+    - recheck가 있다는 건 "revision을 거친 2차 검토"이므로, 이게 최종 판정이다.
+    
+    ⚠️ 중요: 최종 VERDICT(PASS/FAIL)에 따라 리포트 톤과 구조가 달라진다.
+
+    ═══════════════════════════════════════════════════════════════
+    [공통] 반드시 답해야 하는 2문장
+    ═══════════════════════════════════════════════════════════════
+    - 확실하게 다른 점이 보이는가? (Yes/No + 근거 3개)
+    - 그 다른 점이 특정 고객에게 충분히 가치가 있는가? (Yes/No + 근거 3개)
+
+    ═══════════════════════════════════════════════════════════════
+    [PASS인 경우] Go - 다음 STEP으로 진행
+    ═══════════════════════════════════════════════════════════════
+    
+    [리포트 구성]
+    1) Executive Summary (3문장: 핵심 차별점 + 타깃 + 추천 POV)
+    2) Competitor Map 요약 (Direct/Indirect/Substitute로 8~10개, URL 포함)
+    3) Channel/Message 패턴 요약 (가장 강한 후킹/CTA/감정 트리거)
+    4) VP 비교 요약 (Hero 제안, USP 후보, 공통 마찰)
+    5) Gap Hypotheses Top 5 (검증 신호 포함)
+    6) POV/Positioning 추천안 (1개만, 왜 이게 최선인지 근거)
+    7) 다음 액션(7일 플랜):
+       - 추가 조사 질문 5개
+       - 잠재고객 인터뷰 질문 7개(검증 신호와 연결)
+       - STEP2 랜딩 히어로 카피 후보 5개
+       - STEP3 광고 타깃/키워드 초안 10개
+    
+    8) [OPTIONAL EXTENSIONS] (작게, 박스 처리)
+       "현재 POV가 검증되면, 향후 확장 가능성:"
+       - 타깃 확장: (예시)
+       - 기능 심화: (예시)
+       ※ 지금 검증 대상은 아님
+
+    ═══════════════════════════════════════════════════════════════
+    [FAIL인 경우] No-Go - 하지만 끝이 아님
+    ═══════════════════════════════════════════════════════════════
+    
+    [감정적 전달 원칙] ← 매우 중요
+    - "실패"가 아니라 "귀중한 학습"임을 명확히 전달
+    - 이 분석에 투자한 시간이 헛되지 않았음을 강조
+    - "지금 이 형태로는 어렵다"는 것이지, "당신의 직관이 틀렸다"가 아님
+    - 다음 단계(Salvage 또는 새 아이디어)로 자연스럽게 연결
+
+    [리포트 구성]
+    1) Executive Summary
+       "이 아이디어는 [핵심 이유] 때문에 현재 형태로는 진행이 어렵습니다.
+        하지만 이 분석을 통해 [X]를 명확히 알게 되었고,
+        [문제 영역]을 계속 잡고 싶다면 더 나은 방향이 있습니다."
+
+    2) 왜 No-Go인가 (red_team 핵심 요약, 3가지)
+       - 감정적으로 방어적이지 않게, 팩트 중심으로
+       - "이건 당신이 몰랐던 게 아니라, 시장이 원래 그런 겁니다"
+
+    3) 이 분석에서 얻은 것 (학습 가치 강조)
+       - 경쟁 구도에서 배운 것
+       - 타깃 고객에 대해 새로 안 것
+       - 피해야 할 포지셔닝이 뭔지
+
+    4) [FINAL RECOMMENDATION] ← 핵심 섹션
+       
+       ▸ Best Salvage Path (하나만 추천):
+         → red_team이 제시한 Salvage Options 중 가장 합리적인 1개
+         → 왜 이게 최선인지: 시장 크기, 경쟁 강도, 실행 난이도 관점
+         → 이 방향으로 가면 다음에 뭘 해야 하는지 (구체적 액션 3개)
+       
+       ▸ If Not (이 문제 영역을 버리는 경우):
+         → 언제 이 선택이 합리적인지
+         → 이 분석에서 배운 것을 다른 아이디어에 어떻게 적용할 수 있는지
+
+    5) Competitor Map / Gap 분석 요약 (간략하게, 레퍼런스용)
+
+    ═══════════════════════════════════════════════════════════════
+    [공통 규칙]
+    ═══════════════════════════════════════════════════════════════
+    - report에는 가능한 한 URL/근거를 포함해 재현 가능해야 한다.
+    - 확신이 아닌 가정은 "가정"으로 명확히 표기하라.
+    - 아이디어를 늘리지 마라. 수렴이 목표다.
+    - 변형 제안은 "논리적 필연"으로만 (FAIL → Salvage)
+
+  expected_output: >
+    step1_report.md 형태의 마크다운:
+    
+    [PASS인 경우]
+    - Executive Summary + Go 판정
+    - 리포트 구성 순서대로
+    - 표(테이블) 1개 이상: 경쟁사 vs USP/타깃/채널
+    - OPTIONAL EXTENSIONS (작게)
+    
+    [FAIL인 경우]
+    - Executive Summary + No-Go 판정 (감정적으로 건설적인 톤)
+    - 학습 가치 강조
+    - FINAL RECOMMENDATION (Best Salvage Path 1개)
+    - 간략한 분석 요약
+  agent: orchestrator
+  # revision-only 실행 시: allowed_task_ids 필터로 red_team_review는 자동 제외됨
+  # revise_positioning이 있으면 v2 positioning 결과도 참조
+  context:
+    - red_team_review
+    - red_team_recheck
+    - revise_positioning
