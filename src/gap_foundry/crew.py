@@ -715,16 +715,16 @@ class Step1CrewFactory:
 
                 # 모든 의존 task가 이미 생성되었는지 확인
                 if all(c in tasks for c in ctx_ids):
-                    agent_key = task_cfg.get("agent")
+            agent_key = task_cfg.get("agent")
                     if agent_key not in all_agents:
-                        raise KeyError(
+                raise KeyError(
                             f"Task '{task_id}' references unknown agent '{agent_key}'. "
                             f"Known agents: {list(all_agents.keys())}"
-                        )
+                )
 
                     context_tasks = [tasks[c] for c in ctx_ids]  # 항상 list
 
-                    tasks[task_id] = Task(
+            tasks[task_id] = Task(
                         description=task_cfg.get("description", "") or "",
                         expected_output=task_cfg.get("expected_output", "") or "",
                         agent=all_agents[agent_key],
@@ -822,7 +822,7 @@ class Step1CrewFactory:
             agents=list(workers.values()),
             tasks=[tasks[t] for t in task_order],
             process=Process.sequential,  # hierarchical → sequential
-            verbose=False,  # 커스텀 ProgressTracker 사용, CrewAI 기본 출력 끔
+            verbose=True,  # 에이전트 결과물 생성에 필요
             step_callback=step_callback,
             task_callback=task_callback,
         )
@@ -872,7 +872,7 @@ class Step1CrewFactory:
             agents=list(workers.values()),
             tasks=[tasks[t] for t in task_order],
             process=Process.sequential,  # hierarchical → sequential
-            verbose=False,  # 커스텀 ProgressTracker 사용, CrewAI 기본 출력 끔
+            verbose=True,  # 에이전트 결과물 생성에 필요
             step_callback=step_callback,
             task_callback=task_callback,
         )
