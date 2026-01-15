@@ -17,21 +17,21 @@ class ProgressTracker:
     """태스크 진행 상황을 추적하고 표시하는 클래스"""
     
     TASK_LABELS = {
-        "discover_competitors": ("🔍", "경쟁사 발굴", "2~3분"),
-        "compact_competitors": ("📦", "경쟁사 압축", "30초"),  # TPM 최적화
-        "analyze_channels": ("📊", "채널/메시지 분석", "3~4분"),
-        "extract_value_props": ("💎", "가치제안 추출", "3~4분"),
-        "summarize_channels_vp": ("📋", "채널/VP 압축", "30초"),  # TPM 최적화 (가드레일 #3)
-        "mine_gaps": ("🕳️", "빈틈 가설 도출", "2~3분"),
-        "summarize_research": ("📋", "리서치 요약", "1~2분"),
-        "create_pov_and_positioning": ("🎯", "POV/포지셔닝 설계", "3~4분"),
-        "red_team_review": ("👹", "레드팀 검토", "2~3분"),
-        "revise_positioning": ("✏️", "포지셔닝 수정", "2~3분"),
-        "red_team_recheck": ("👹", "레드팀 재검토", "1~2분"),
-        "final_step1_report": ("📝", "최종 리포트 작성", "2~3분"),
+        "discover_competitors": ("🔍", "경쟁사 발굴", "2~3분", "직접/간접 경쟁사 15개+ 검색"),
+        "compact_competitors": ("📦", "경쟁사 압축", "30초", "상위 8개 핵심 정보 추출"),
+        "analyze_channels": ("📊", "채널/메시지 분석", "3~4분", "마케팅 채널 & 메시지 패턴 분석"),
+        "extract_value_props": ("💎", "가치제안 추출", "3~4분", "USP, 가격, 마찰점 추출"),
+        "summarize_channels_vp": ("📋", "채널/VP 압축", "30초", "핵심 패턴 요약"),
+        "mine_gaps": ("🕳️", "빈틈 가설 도출", "2~3분", "시장 기회 가설 생성"),
+        "summarize_research": ("📋", "리서치 요약", "1~2분", "전체 리서치 압축"),
+        "create_pov_and_positioning": ("🎯", "POV/포지셔닝 설계", "3~4분", "차별화 전략 수립"),
+        "red_team_review": ("👹", "레드팀 검토", "2~3분", "날카로운 반증 & 판정"),
+        "revise_positioning": ("✏️", "포지셔닝 수정", "2~3분", "피드백 반영 수정"),
+        "red_team_recheck": ("👹", "레드팀 재검토", "1~2분", "수정본 재검토"),
+        "final_step1_report": ("📝", "최종 리포트 작성", "2~3분", "Go/No-Go 결론 도출"),
     }
     
-    def __init__(self, task_order: List[str], include_revision: bool = False):
+    def __init__(self, task_order: List[str], include_revision: bool = False, is_revision: bool = False):
         self.task_order = task_order
         self.total_tasks = len(task_order)
         self.current_task_idx = 0
@@ -39,30 +39,62 @@ class ProgressTracker:
         self.task_end_times: Dict[str, float] = {}
         self.start_time = time.time()
         self.include_revision = include_revision
+        self.is_revision = is_revision
         
-    def _get_label(self, task_id: str) -> Tuple[str, str, str]:
-        """태스크 ID에 대한 (이모지, 한글명, 예상시간) 반환"""
-        return self.TASK_LABELS.get(task_id, ("⚙️", task_id, "?분"))
+    def _get_label(self, task_id: str) -> Tuple[str, str, str, str]:
+        """태스크 ID에 대한 (이모지, 한글명, 예상시간, 설명) 반환"""
+        return self.TASK_LABELS.get(task_id, ("⚙️", task_id, "?분", "처리 중"))
+    
+    def _make_progress_bar(self, current: int, total: int, width: int = 30) -> str:
+        """프로그레스 바 생성"""
+        filled = int(width * current / total) if total > 0 else 0
+        bar = "█" * filled + "░" * (width - filled)
+        percent = int(100 * current / total) if total > 0 else 0
+        return f"[{bar}] {percent}%"
     
     def print_header(self):
         """실행 시작 헤더 출력"""
-        mode = "Auto-Revise 모드" if self.include_revision else "기본 모드"
-        print("\n" + "═" * 65)
-        print(f"🚀 STEP1 시장검증 실행 중... ({mode})")
-        print("═" * 65)
-        print(f"📋 총 {self.total_tasks}개 태스크 | 예상 소요: 15~25분")
-        print("─" * 65 + "\n")
+        if self.is_revision:
+            mode = "🔄 Revision-only 모드"
+            est_time = "3~5분"
+        elif self.include_revision:
+            mode = "Auto-Revise 모드"
+            est_time = "15~25분"
+        else:
+            mode = "기본 모드"
+            est_time = "15~25분"
+        
+        print("\n" + "╔" + "═" * 63 + "╗")
+        print(f"║ 🚀 STEP1 시장검증 실행 중... ({mode})" + " " * (44 - len(mode)) + "║")
+        print("╠" + "═" * 63 + "╣")
+        print(f"║ 📋 총 {self.total_tasks}개 태스크 | 예상 소요: {est_time}" + " " * (35 - len(est_time)) + "║")
+        print("╚" + "═" * 63 + "╝")
+        
+        # 태스크 목록 미리보기
+        print("\n📋 실행 예정 태스크:")
+        for i, task_id in enumerate(self.task_order):
+            emoji, label, est, desc = self._get_label(task_id)
+            status = "⏳" if i == 0 else "○"
+            print(f"   {status} {i+1}. {emoji} {label} ({est}) - {desc}")
+        print()
     
     def on_task_start(self, task_id: str):
         """태스크 시작 시 호출"""
         self.task_start_times[task_id] = time.time()
-        emoji, label, est_time = self._get_label(task_id)
+        emoji, label, est_time, desc = self._get_label(task_id)
         
         elapsed = time.time() - self.start_time
-        elapsed_str = f"{int(elapsed // 60)}분 {int(elapsed % 60)}초"
+        elapsed_str = f"{int(elapsed // 60)}:{int(elapsed % 60):02d}"
         
-        print(f"\n[{self.current_task_idx + 1}/{self.total_tasks}] {emoji} {label} 시작...")
-        print(f"      └─ 예상: {est_time} | 총 경과: {elapsed_str}")
+        # 프로그레스 바
+        progress_bar = self._make_progress_bar(self.current_task_idx, self.total_tasks)
+        
+        print(f"\n{'─' * 65}")
+        print(f"▶ [{self.current_task_idx + 1}/{self.total_tasks}] {emoji} {label} 시작")
+        print(f"  {progress_bar}")
+        print(f"  💡 {desc}")
+        print(f"  ⏱️ 예상: {est_time} | 경과: {elapsed_str}")
+        print(f"{'─' * 65}")
     
     def on_task_end(self, task_id: str, output_preview: str = ""):
         """태스크 완료 시 호출"""
@@ -70,41 +102,102 @@ class ProgressTracker:
         duration = self.task_end_times[task_id] - self.task_start_times.get(task_id, self.start_time)
         duration_str = f"{int(duration // 60)}분 {int(duration % 60)}초"
         
-        emoji, label, _ = self._get_label(task_id)
-        
-        print(f"✅ [{self.current_task_idx + 1}/{self.total_tasks}] {label} 완료 ({duration_str})")
-        if output_preview:
-            # 출력 미리보기 (첫 100자)
-            preview = output_preview[:100].replace("\n", " ")
-            if len(output_preview) > 100:
-                preview += "..."
-            print(f"      └─ {preview}")
+        emoji, label, _, _ = self._get_label(task_id)
         
         self.current_task_idx += 1
+        
+        # 결과 요약 생성
+        result_summary = self._extract_result_summary(task_id, output_preview)
+        
+        print(f"\n✅ {emoji} {label} 완료 ({duration_str})")
+        if result_summary:
+            print(f"   └─ 📌 {result_summary}")
         
         # 남은 태스크 예상
         if self.current_task_idx < self.total_tasks:
             remaining = self.total_tasks - self.current_task_idx
             avg_time = (time.time() - self.start_time) / self.current_task_idx
             est_remaining = avg_time * remaining
-            print(f"      └─ 남은 태스크: {remaining}개 | 예상 남은 시간: ~{int(est_remaining // 60)}분")
+            est_min = int(est_remaining // 60)
+            
+            # 다음 태스크 미리보기
+            next_task = self.task_order[self.current_task_idx]
+            next_emoji, next_label, next_est, _ = self._get_label(next_task)
+            
+            print(f"   └─ ⏳ 남은 시간: ~{est_min}분 | 다음: {next_emoji} {next_label}")
+    
+    def _extract_result_summary(self, task_id: str, output: str) -> str:
+        """태스크 결과에서 핵심 요약 추출"""
+        if not output:
+            return ""
+        
+        output_lower = output.lower()
+        
+        # 태스크별 요약 추출
+        if task_id == "discover_competitors":
+            # 경쟁사 수 추출
+            import re
+            items_match = re.search(r'"items"\s*:\s*\[(.*?)\]', output, re.DOTALL)
+            if items_match:
+                items_count = items_match.group(1).count('"name"')
+                return f"경쟁사 {items_count}개 발굴"
+        
+        if task_id == "mine_gaps":
+            # gap 수 추출
+            gap_count = output.count('"gap_id"') or output.count('gap_')
+            if gap_count > 0:
+                return f"빈틈 가설 {gap_count}개 도출"
+        
+        if task_id in ["red_team_review", "red_team_recheck"]:
+            # VERDICT 추출
+            if "VERDICT: PASS" in output.upper():
+                return "✅ VERDICT: PASS"
+            elif "VERDICT: FAIL" in output.upper():
+                return "❌ VERDICT: FAIL"
+        
+        if task_id == "create_pov_and_positioning":
+            # Option 수 추출
+            option_count = output.lower().count("option ")
+            if option_count > 0:
+                return f"포지셔닝 Option {min(option_count, 3)}개 생성"
+        
+        # 기본: 첫 80자
+        preview = output[:80].replace("\n", " ").strip()
+        if len(output) > 80:
+            preview += "..."
+        return preview if preview else ""
     
     def print_summary(self):
         """실행 완료 요약 출력"""
         total_time = time.time() - self.start_time
-        total_str = f"{int(total_time // 60)}분 {int(total_time % 60)}초"
+        total_min = int(total_time // 60)
+        total_sec = int(total_time % 60)
         
-        print("\n" + "═" * 65)
-        print(f"✅ STEP1 실행 완료! (총 소요: {total_str})")
-        print("═" * 65)
+        print("\n" + "╔" + "═" * 63 + "╗")
+        print(f"║ ✅ STEP1 실행 완료!                                           ║")
+        print("╠" + "═" * 63 + "╣")
+        print(f"║ ⏱️ 총 소요 시간: {total_min}분 {total_sec}초" + " " * (40 - len(f"{total_min}분 {total_sec}초")) + "║")
+        print("╚" + "═" * 63 + "╝")
         
-        # 태스크별 소요 시간
+        # 태스크별 소요 시간 (바 그래프)
         print("\n📊 태스크별 소요 시간:")
+        max_duration = max(
+            (self.task_end_times.get(t, 0) - self.task_start_times.get(t, 0))
+            for t in self.task_order
+        ) if self.task_order else 1
+        
         for task_id in self.task_order:
             if task_id in self.task_end_times and task_id in self.task_start_times:
                 duration = self.task_end_times[task_id] - self.task_start_times[task_id]
-                emoji, label, _ = self._get_label(task_id)
-                print(f"   {emoji} {label}: {int(duration // 60)}분 {int(duration % 60)}초")
+                emoji, label, _, _ = self._get_label(task_id)
+                
+                # 미니 바 그래프
+                bar_width = int(20 * duration / max_duration) if max_duration > 0 else 0
+                bar = "▓" * bar_width + "░" * (20 - bar_width)
+                
+                duration_str = f"{int(duration // 60)}:{int(duration % 60):02d}"
+                print(f"   {emoji} {label[:12]:<12} {bar} {duration_str}")
+        
         print()
 
 
@@ -119,19 +212,85 @@ def _make_step_callback(tracker: ProgressTracker) -> Callable:
     - 실시간으로 무엇을 하고 있는지 표시
     """
     last_agent = [None]
+    last_action = [None]
     step_count = [0]
+    tool_call_count = [0]
+    
+    # 에이전트 역할 → 한글명 매핑
+    AGENT_LABELS = {
+        "competitor_discovery_agent": "🔍 경쟁사 발굴",
+        "channel_intel_agent": "📊 채널 분석",
+        "vp_extractor_agent": "💎 VP 추출",
+        "gap_miner_agent": "🕳️ 빈틈 발굴",
+        "research_summarizer_agent": "📋 리서치 요약",
+        "pov_strategist_agent": "🎯 POV 전략",
+        "red_team_agent": "👹 레드팀",
+    }
+    
+    def _format_elapsed() -> str:
+        elapsed = time.time() - tracker.start_time
+        return f"{int(elapsed // 60)}:{int(elapsed % 60):02d}"
+    
+    def _get_agent_label(agent_name: str) -> str:
+        """에이전트 이름을 한글 라벨로 변환"""
+        if not agent_name:
+            return "🤖 에이전트"
+        agent_lower = agent_name.lower().replace(" ", "_")
+        for key, label in AGENT_LABELS.items():
+            if key in agent_lower or agent_lower in key:
+                return label
+        # 원본에서 추출 시도
+        if "competitor" in agent_lower:
+            return "🔍 경쟁사 발굴"
+        if "channel" in agent_lower:
+            return "📊 채널 분석"
+        if "vp" in agent_lower or "value" in agent_lower:
+            return "💎 VP 추출"
+        if "gap" in agent_lower:
+            return "🕳️ 빈틈 발굴"
+        if "summar" in agent_lower:
+            return "📋 리서치 요약"
+        if "pov" in agent_lower or "position" in agent_lower:
+            return "🎯 POV 전략"
+        if "red" in agent_lower:
+            return "👹 레드팀"
+        return f"🤖 {agent_name[:20]}"
+    
+    def _parse_tool_info(step_output) -> Optional[Tuple[str, str]]:
+        """도구 호출 정보 추출 → (tool_name, tool_input)"""
+        tool_name = None
+        tool_input = None
+        
+        # 다양한 속성 시도
+        if hasattr(step_output, 'tool'):
+            tool_name = str(step_output.tool)
+        if hasattr(step_output, 'tool_input'):
+            ti = step_output.tool_input
+            if isinstance(ti, dict):
+                # search_query, query, url 등 추출
+                tool_input = ti.get('search_query') or ti.get('query') or ti.get('url') or ti.get('website_url') or str(ti)[:60]
+            else:
+                tool_input = str(ti)[:60]
+        
+        # action에서 도구 정보 추출 시도
+        if not tool_name and hasattr(step_output, 'action'):
+            action = str(step_output.action)
+            if 'search' in action.lower():
+                tool_name = 'search'
+            elif 'scrape' in action.lower() or 'website' in action.lower():
+                tool_name = 'scrape'
+        
+        if tool_name:
+            return (tool_name, tool_input or "")
+        return None
     
     def callback(step_output):
+        nonlocal tool_call_count
         try:
             step_count[0] += 1
             
-            # step_output 구조 분석 (CrewAI 버전에 따라 다름)
-            # 일반적으로: step_output.agent, step_output.thought, step_output.action 등
+            # 에이전트 이름 추출
             agent_name = None
-            thought = None
-            action = None
-            
-            # 다양한 속성명 시도
             if hasattr(step_output, 'agent'):
                 agent_obj = step_output.agent
                 if hasattr(agent_obj, 'role'):
@@ -139,26 +298,48 @@ def _make_step_callback(tracker: ProgressTracker) -> Callable:
                 elif isinstance(agent_obj, str):
                     agent_name = agent_obj
             
-            if hasattr(step_output, 'thought'):
-                thought = str(step_output.thought)[:80]
-            elif hasattr(step_output, 'log'):
-                thought = str(step_output.log)[:80]
-            
-            if hasattr(step_output, 'action'):
-                action = str(step_output.action)[:50]
-            elif hasattr(step_output, 'tool'):
-                action = f"Tool: {step_output.tool}"[:50]
-            
             # 에이전트가 바뀌면 표시
             if agent_name and agent_name != last_agent[0]:
-                elapsed = time.time() - tracker.start_time
-                elapsed_str = f"{int(elapsed // 60)}:{int(elapsed % 60):02d}"
-                print(f"\n   🤖 [{elapsed_str}] {agent_name} 작업 중...")
+                label = _get_agent_label(agent_name)
+                print(f"\n   {label} 작업 중... [{_format_elapsed()}]")
                 last_agent[0] = agent_name
+                tool_call_count[0] = 0  # 새 에이전트면 도구 카운트 리셋
             
-            # 액션이 있으면 표시 (도구 사용 등)
-            if action and "Tool" in action:
-                print(f"      └─ {action}")
+            # 도구 호출 감지 및 표시
+            tool_info = _parse_tool_info(step_output)
+            if tool_info:
+                tool_name, tool_input = tool_info
+                action_key = f"{tool_name}:{tool_input}"
+                
+                # 같은 도구 호출 중복 방지
+                if action_key != last_action[0]:
+                    tool_call_count[0] += 1
+                    last_action[0] = action_key
+                    
+                    # 도구 종류에 따른 이모지/메시지
+                    if 'search' in tool_name.lower():
+                        query_preview = tool_input[:50] if tool_input else "..."
+                        print(f"      🔎 검색 중: \"{query_preview}\"")
+                    elif 'scrape' in tool_name.lower() or 'website' in tool_name.lower():
+                        url_preview = tool_input[:40] if tool_input else "..."
+                        print(f"      🌐 웹 분석 중: {url_preview}")
+                    elif 'read' in tool_name.lower() or 'file' in tool_name.lower():
+                        print(f"      📄 파일 읽는 중...")
+                    else:
+                        print(f"      🔧 {tool_name[:30]} 실행 중...")
+            
+            # 생각/추론 과정 표시 (가끔)
+            thought = None
+            if hasattr(step_output, 'thought'):
+                thought = str(step_output.thought)
+            elif hasattr(step_output, 'log'):
+                thought = str(step_output.log)
+            
+            # 중요 키워드가 포함된 생각만 표시
+            if thought and step_count[0] % 5 == 0:  # 5스텝마다 한 번
+                thought_preview = thought[:60].replace("\n", " ")
+                if any(kw in thought.lower() for kw in ['found', 'analyzing', 'comparing', '발견', '분석', '비교', '검토']):
+                    print(f"      💭 {thought_preview}...")
             
         except Exception:
             pass  # 에러 무시하고 계속 진행
