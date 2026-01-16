@@ -715,16 +715,16 @@ class Step1CrewFactory:
 
                 # 모든 의존 task가 이미 생성되었는지 확인
                 if all(c in tasks for c in ctx_ids):
-            agent_key = task_cfg.get("agent")
+                    agent_key = task_cfg.get("agent")
                     if agent_key not in all_agents:
-                raise KeyError(
+                        raise KeyError(
                             f"Task '{task_id}' references unknown agent '{agent_key}'. "
                             f"Known agents: {list(all_agents.keys())}"
-                )
+                        )
 
                     context_tasks = [tasks[c] for c in ctx_ids]  # 항상 list
 
-            tasks[task_id] = Task(
+                    tasks[task_id] = Task(
                         description=task_cfg.get("description", "") or "",
                         expected_output=task_cfg.get("expected_output", "") or "",
                         agent=all_agents[agent_key],
@@ -834,11 +834,13 @@ class Step1CrewFactory:
         show_progress: bool = False,
     ) -> Tuple[Crew, Optional["ProgressTracker"]]:
         """
-        Revision 태스크만 실행하는 Crew를 빌드한다.
-        (2-pass 실행 시 사용: 1차에서 FAIL 받으면 이걸로 재실행)
+        Revision 태스크만 실행하는 Crew를 빌드한다 (final_report 제외).
+        (2-stage 실행의 Stage A-Pass2: 1차에서 LANDING_HOLD일 때)
+        
+        final_step1_report는 Stage B에서 verdict를 inputs로 받아 별도 실행.
         
         주의: 이전 실행의 결과가 inputs에 포함되어 있어야 함:
-              - previous_pov_output: create_pov_and_positioning 결과
+              - previous_positioning_output: create_pov_and_positioning 결과
               - previous_red_team_output: red_team_review 결과
         
         Returns:
@@ -849,7 +851,7 @@ class Step1CrewFactory:
         task_order = [
             "revise_positioning",
             "red_team_recheck",
-            "final_step1_report",
+            # final_step1_report는 Stage B에서 별도 실행
         ]
 
         # revision-only 태스크만 생성 (context 필터링 적용)
@@ -873,6 +875,107 @@ class Step1CrewFactory:
             tasks=[tasks[t] for t in task_order],
             process=Process.sequential,  # hierarchical → sequential
             verbose=True,  # 에이전트 결과물 생성에 필요
+            step_callback=step_callback,
+            task_callback=task_callback,
+        )
+        
+        return crew, tracker
+
+    def build_without_final_report(
+        self,
+        include_revision: bool = False,
+        show_progress: bool = False,
+    ) -> Tuple[Crew, Optional["ProgressTracker"]]:
+        """
+        final_step1_report 없이 나머지 태스크만 실행하는 Crew를 빌드한다.
+        (2-stage 실행의 Stage 1: verdict 추출 후 final_report 별도 실행)
+        
+        Args:
+            include_revision: True면 revision 태스크 포함
+            show_progress: True면 진행 상황 표시
+        """
+        manager, workers = self.create_agents()
+
+        if include_revision:
+            task_order = [
+                "discover_competitors",
+                "compact_competitors",
+                "analyze_channels",
+                "extract_value_props",
+                "summarize_channels_vp",
+                "mine_gaps",
+                "summarize_research",
+                "create_pov_and_positioning",
+                "red_team_review",
+                "revise_positioning",
+                "red_team_recheck",
+                # final_step1_report 제외!
+            ]
+        else:
+            task_order = [
+                "discover_competitors",
+                "compact_competitors",
+                "analyze_channels",
+                "extract_value_props",
+                "summarize_channels_vp",
+                "mine_gaps",
+                "summarize_research",
+                "create_pov_and_positioning",
+                "red_team_review",
+                # final_step1_report 제외!
+            ]
+
+        tasks = self.create_tasks(workers, manager, allowed_task_ids=task_order)
+
+        missing = [t for t in task_order if t not in tasks]
+        if missing:
+            raise KeyError(f"task_order contains unknown task ids: {missing}")
+
+        tracker = ProgressTracker(task_order, include_revision) if show_progress else None
+        step_callback = _make_step_callback(tracker) if tracker else None
+        task_callback = _make_task_callback(tracker) if tracker else None
+
+        crew = Crew(
+            agents=list(workers.values()),
+            tasks=[tasks[t] for t in task_order],
+            process=Process.sequential,
+            verbose=True,
+            step_callback=step_callback,
+            task_callback=task_callback,
+        )
+        
+        return crew, tracker
+
+    def build_final_report_only(
+        self,
+        show_progress: bool = False,
+    ) -> Tuple[Crew, Optional["ProgressTracker"]]:
+        """
+        final_step1_report만 실행하는 Crew를 빌드한다.
+        (2-stage 실행의 Stage 2: verdict를 inputs로 받아서 리포트 생성)
+        
+        주의: inputs에 아래 필드가 필요함:
+            - landing_gate_verdict: "LANDING_GO" | "LANDING_HOLD" | "LANDING_NO"
+            - research_summary: 리서치 요약 (stage 1에서 저장된 것)
+            - gap_hypotheses: 빈틈 가설 (stage 1에서 저장된 것)
+            - (revision 시) previous_positioning_output, previous_red_team_output
+        """
+        manager, workers = self.create_agents()
+        
+        task_order = ["final_step1_report"]
+        
+        # final_step1_report만 생성 (context 필터링으로 빈 context가 됨)
+        tasks = self.create_tasks(workers, manager, allowed_task_ids=task_order)
+        
+        tracker = ProgressTracker(task_order) if show_progress else None
+        step_callback = _make_step_callback(tracker) if tracker else None
+        task_callback = _make_task_callback(tracker) if tracker else None
+
+        crew = Crew(
+            agents=list(workers.values()),
+            tasks=[tasks[t] for t in task_order],
+            process=Process.sequential,
+            verbose=True,
             step_callback=step_callback,
             task_callback=task_callback,
         )
