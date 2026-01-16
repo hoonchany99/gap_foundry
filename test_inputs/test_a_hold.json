@@ -1,0 +1,10 @@
+{
+  "idea_one_liner": "의료진이 진료 중 느끼는 감정과 만족도를 기록해주는 일기형 서비스",
+  "target_customer": "의사 및 간호사 등 의료진",
+  "problem_statement": "의료진은 진료 과정에서 다양한 감정과 생각을 경험하지만, 이를 체계적으로 기록하거나 돌아볼 방법이 거의 없다.",
+  "current_alternatives": "개인 메모, 일기 앱, 노트에 수기 기록",
+  "geo_market": "KR",
+  "business_type": "B2B",
+  "constraints": "의료법 및 개인정보 이슈를 고려해야 함",
+  "success_criteria": "의료진의 감정 관리 및 자기 성찰에 도움이 됨"
+}

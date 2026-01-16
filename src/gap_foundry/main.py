@@ -1272,10 +1272,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             crew_stage2, _ = Step1CrewFactory().build_final_report_only(show_progress=True)
             final_result = crew_stage2.kickoff(inputs=report_inputs)
-        except Exception as e:
+    except Exception as e:
             print(f"❌ Stage 2 실행 오류: {e}", file=sys.stderr)
-            return 1
-        
+        return 1
+
         elapsed_time = time.time() - start_time
         final_text = str(final_result)
         
@@ -1330,24 +1330,60 @@ def main(argv: Optional[list[str]] = None) -> int:
     report_footer = _generate_report_footer(metrics) if metrics else ""
     
     # ═══════════════════════════════════════════════════════════════
-    # LLM 본문 시간 패턴 탐지 (운영 안전장치)
+    # LLM 본문 안전장치 (운영급 검증)
     # ═══════════════════════════════════════════════════════════════
-    forbidden_patterns = [
-        r'\d+\s*분\s*\d*\s*초',  # "13분 15초", "3분 53초"
-        r'\d+\s*분(?!\s*석)',   # "13분" (but not "분석")
-        r'(?<!\d)\d+\s*초',      # "795초" (standalone)
-        r'총\s*토큰',            # "총 토큰"
-        r'총\s*실행\s*시간',     # "총 실행 시간" (LLM이 쓰면 안 됨)
-    ]
-    violations = []
-    for pattern in forbidden_patterns:
-        matches = re.findall(pattern, final_text)
-        if matches:
-            violations.extend(matches)
+    safety_violations = []
     
-    if violations:
-        print(f"\n⚠️ [경고] LLM 본문에 시간/통계 관련 금지 표현 발견: {violations[:5]}", file=sys.stderr)
-        print("   → 이 정보는 코드가 자동 삽입하므로 LLM이 쓰면 부정확할 수 있음", file=sys.stderr)
+    # 안전장치 1: 시간/통계 패턴 탐지
+    forbidden_time_patterns = [
+        (r'\d+\s*분\s*\d*\s*초', "시간(분초)"),
+        (r'\d+\s*분(?!\s*석)', "시간(분)"),
+        (r'(?<!\d)\d+\s*초', "시간(초)"),
+        (r'총\s*토큰', "토큰"),
+        (r'총\s*실행\s*시간', "실행시간"),
+    ]
+    for pattern, desc in forbidden_time_patterns:
+        if re.search(pattern, final_text):
+            safety_violations.append(f"시간/통계 패턴({desc})")
+    
+    # 안전장치 2: VERDICT/이모지 불일치 탐지
+    emoji_map = {"LANDING_GO": "🟢", "LANDING_HOLD": "🟡", "LANDING_NO": "🔴"}
+    correct_emoji = emoji_map.get(final_verdict, "")
+    for verdict_type, emoji in emoji_map.items():
+        if verdict_type != final_verdict and emoji in final_text:
+            safety_violations.append(f"잘못된 이모지({emoji}, 정답은 {correct_emoji})")
+    
+    # 안전장치 3: 본문에서 verdict 재선언 탐지
+    verdict_redeclaration_patterns = [
+        r'VERDICT\s*:\s*LANDING',  # "VERDICT: LANDING_GO"
+        r'최종\s*판정\s*[:：]?\s*(LANDING|🟢|🟡|🔴)',  # "최종 판정: LANDING_GO"
+        r'Landing\s*Gate\s*결과\s*[:：]?\s*(GO|HOLD|NO)',  # "Landing Gate 결과: GO"
+    ]
+    for pattern in verdict_redeclaration_patterns:
+        if re.search(pattern, final_text, re.IGNORECASE):
+            safety_violations.append("본문에서 verdict 재선언")
+    
+    # 안전장치 4: 코드 전용 섹션 헤더가 본문에 나오면 경고
+    code_only_headers = [
+        r'##\s*⏱️\s*실행\s*정보',  # 실행 정보는 코드가 삽입
+        r'##\s*🧩\s*검증\s*대상\s*아이디어',  # Idea Anchor는 코드가 삽입
+        r'##\s*🚦\s*Landing\s*Gate\s*결과\s*요약',  # Gate 요약은 코드가 삽입
+        r'##\s*📊\s*토큰/비용\s*통계',  # 토큰/비용은 footer에서
+    ]
+    for pattern in code_only_headers:
+        if re.search(pattern, final_text):
+            safety_violations.append(f"코드 전용 섹션 헤더가 본문에 포함")
+    
+    # 결과 출력
+    if safety_violations:
+        print(f"\n{'='*60}", file=sys.stderr)
+        print("⚠️ [LLM 본문 안전 검사 경고]", file=sys.stderr)
+        print(f"{'='*60}", file=sys.stderr)
+        for i, v in enumerate(safety_violations, 1):
+            print(f"  {i}. {v}", file=sys.stderr)
+        print(f"\n   → 위 항목들은 코드가 자동 삽입하므로 LLM이 쓰면 불일치 발생", file=sys.stderr)
+        print(f"   → header/footer의 코드 주입 값이 정확한 값입니다", file=sys.stderr)
+        print(f"{'='*60}\n", file=sys.stderr)
     
     final_text_with_header = report_header + final_text + report_footer
     
