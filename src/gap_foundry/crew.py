@@ -722,7 +722,7 @@ class Step1CrewFactory:
                             f"Known agents: {list(all_agents.keys())}"
                         )
 
-                    context_tasks = [tasks[c] for c in ctx_ids]  # 항상 list
+                    context_tasks = [tasks[c] for c in ctx_ids]
 
                     tasks[task_id] = Task(
                         description=task_cfg.get("description", "") or "",

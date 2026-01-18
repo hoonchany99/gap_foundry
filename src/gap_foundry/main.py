@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -69,6 +70,337 @@ def _validate_inputs(data: Dict[str, Any]) -> None:
     missing = [k for k in REQUIRED_KEYS if not data.get(k)]
     if missing:
         raise ValueError(f"Missing required input keys: {missing}")
+
+
+# ============================================================================
+# 운영급 가드레일 #0: PreGate (입력 구체성 체크)
+# ============================================================================
+
+# PreGate 규칙 로드 (config/pregate_rules.yaml에서)
+def _load_pregate_rules() -> Dict[str, Any]:
+    """PreGate 규칙을 YAML 파일에서 로드"""
+    rules_path = Path(__file__).parent / "config" / "pregate_rules.yaml"
+    
+    if rules_path.exists():
+        try:
+            import yaml
+            with open(rules_path, encoding="utf-8") as f:
+                loaded = yaml.safe_load(f)
+                if loaded and isinstance(loaded, dict):
+                    return loaded
+        except ImportError:
+            print("⚠️ PyYAML 미설치. PreGate 기본 규칙 사용 (pip install pyyaml)", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ pregate_rules.yaml 파싱 실패: {e}. 기본 규칙 사용", file=sys.stderr)
+    else:
+        # 파일이 없을 때만 경고 (개발 환경에서는 보통 있음)
+        print("⚠️ config/pregate_rules.yaml 없음. 기본 규칙 사용", file=sys.stderr)
+    
+    # 기본값 (yaml 파일이 없거나 로드 실패 시) - 보수적으로 동작
+    return {
+        "min_lengths": {
+            "target_customer": 2,      # 경고용, FAIL 아님
+            "problem_statement": 11,
+            "idea_one_liner": 15,
+            "current_alternatives": 10,
+        },
+        "specific_short_targets_allowlist": [
+            r"^의사$", r"^간호사$", r"^약사$", r"^교사$", r"^개발자$",
+            r"^디자이너$", r"^프리랜서$", r"^소상공인$", r"^직장인$",
+            r"^doctors?$", r"^nurses?$", r"^developers?$", r"^freelancers?$",
+        ],
+        "vague_target_patterns": [
+            r"^모든\s*사람", r"^누구나", r"^일반인", r"^모두$",
+            r"^사람들$", r"^사용자$", r"^고객$",
+            r"^everyone$", r"^anyone$", r"^all\s*people",
+        ],
+        "truism_problem_patterns": [
+            # 추상 명사 + 중요/필요 조합만 잡음
+            r"(건강|행복|성공|자기계발|시간관리|생산성).*(중요하다|필요하다)$",
+            r"좋다$", r"나쁘다$",
+            r"(health|happiness|success).*(is\s+important|is\s+needed)$",
+        ],
+        "action_patterns": {
+            "strong": [
+                r"자동화", r"계산", r"기록", r"분석", r"추천", r"알림", r"예약", r"매칭",
+                r"\bautomate\b", r"\bcalculate\b", r"\btrack\b", r"\banalyze\b",
+            ],
+            "weak": [
+                r"하는", r"해주는", r"돕는", r"만드는", r"관리",
+                r"\bhelp\b", r"\bmake\b", r"\breduce\b", r"\bmanage\b",
+            ],
+        },
+        "judgment": {"core_fail_threshold": 2},
+    }
+
+
+# 규칙 캐시 (한 번만 로드)
+_PREGATE_RULES: Optional[Dict[str, Any]] = None
+
+def _get_pregate_rules() -> Dict[str, Any]:
+    """PreGate 규칙 가져오기 (캐시됨)"""
+    global _PREGATE_RULES
+    if _PREGATE_RULES is None:
+        _PREGATE_RULES = _load_pregate_rules()
+    return _PREGATE_RULES
+
+
+@dataclass
+class PreGateResult:
+    """PreGate 체크 결과"""
+    is_valid: bool
+    fail_reasons: list
+    warnings: list
+    score: float  # 0.0 ~ 1.0 (낮을수록 모호함)
+
+
+def _pregate_check(data: Dict[str, Any]) -> PreGateResult:
+    """
+    PreGate: 입력이 랜딩 테스트를 돌릴 만큼 구체적인지 체크.
+    
+    Q0(Idea Invariance)와 분리:
+    - Q0: 아이디어가 '변형'되었는지 체크
+    - PreGate: 입력이 '검증 가능한 단위'인지 체크
+    
+    v2 개선:
+    - 짧지만 구체적인 타깃(의사, 개발자) allowlist 지원
+    - 길이 기준은 warn으로 (FAIL 아님)
+    - action_patterns: strong/weak 2레벨 구조
+    - truism_patterns: "추상명사+중요/필요" 조합만 잡음
+    
+    Returns:
+        PreGateResult with:
+        - is_valid: PreGate 통과 여부
+        - fail_reasons: 실패 이유 목록
+        - warnings: 경고 (통과는 했지만 주의 필요)
+        - score: 0.0 ~ 1.0 (구체성 점수, 내부용)
+    """
+    # 규칙 로드
+    rules = _get_pregate_rules()
+    min_lengths = rules.get("min_lengths", {})
+    allowlist = rules.get("specific_short_targets_allowlist", [])
+    vague_target_patterns = rules.get("vague_target_patterns", [])
+    truism_patterns = rules.get("truism_problem_patterns", [])
+    action_patterns = rules.get("action_patterns", {})
+    core_fail_threshold = rules.get("judgment", {}).get("core_fail_threshold", 2)
+    
+    fail_reasons = []
+    warnings = []
+    checks_passed = 0
+    total_checks = 4
+    
+    target = data.get("target_customer", "").strip()
+    target_lower = target.lower()
+    problem = data.get("problem_statement", "").strip()
+    problem_lower = problem.lower()
+    idea = data.get("idea_one_liner", "").strip()
+    alternatives = data.get("current_alternatives", "").strip()
+    
+    # ─────────────────────────────────────────────────────────────
+    # Check 1: 타깃이 비특정인가?
+    # ─────────────────────────────────────────────────────────────
+    is_vague_target = False
+    is_in_allowlist = False
+    
+    # Step 1a: allowlist 체크 (짧아도 구체적인 직군)
+    for pattern in allowlist:
+        if re.search(pattern, target_lower, re.IGNORECASE):
+            is_in_allowlist = True
+            break
+    
+    # Step 1b: vague 패턴 체크 (allowlist보다 우선순위 높음)
+    for pattern in vague_target_patterns:
+        if re.search(pattern, target_lower, re.IGNORECASE):
+            is_vague_target = True
+            break
+    
+    # Step 1c: 길이 체크 (allowlist에 없고 vague도 아닐 때만 warn)
+    min_target_len = min_lengths.get("target_customer", 2)
+    if not is_in_allowlist and not is_vague_target and len(target) < min_target_len:
+        warnings.append(f"타깃이 짧음 (권장: 더 구체적으로): '{target}'")
+    
+    if is_vague_target:
+        fail_reasons.append(f"타깃이 비특정: '{target}'")
+    else:
+        checks_passed += 1
+    
+    # ─────────────────────────────────────────────────────────────
+    # Check 2: 문제가 상식 수준인가?
+    # ─────────────────────────────────────────────────────────────
+    is_truism = False
+    for pattern in truism_patterns:
+        if re.search(pattern, problem_lower, re.IGNORECASE):
+            is_truism = True
+            break
+    
+    # 길이 체크: 너무 짧으면 warn (FAIL 아님)
+    min_problem_len = min_lengths.get("problem_statement", 11)
+    if len(problem) < min_problem_len and not is_truism:
+        warnings.append(f"문제 설명이 짧음 (권장: 더 구체적으로): '{problem}'")
+    
+    if is_truism:
+        fail_reasons.append(f"문제가 상식 수준: '{problem}'")
+    else:
+        checks_passed += 1
+    
+    # ─────────────────────────────────────────────────────────────
+    # Check 3: 아이디어가 행동을 포함하는가? (strong/weak 2레벨)
+    # ─────────────────────────────────────────────────────────────
+    has_strong_action = False
+    has_weak_action = False
+    
+    # action_patterns가 dict(새 구조)인지 list(구 구조)인지 확인
+    if isinstance(action_patterns, dict):
+        strong_patterns = action_patterns.get("strong", [])
+        weak_patterns = action_patterns.get("weak", [])
+    else:
+        # 구 구조 호환: 전부 strong으로 취급
+        strong_patterns = action_patterns
+        weak_patterns = []
+    
+    # strong 패턴 체크
+    for pattern in strong_patterns:
+        if re.search(pattern, idea, re.IGNORECASE):
+            has_strong_action = True
+            break
+    
+    # weak 패턴 체크 (strong이 없을 때만)
+    if not has_strong_action:
+        for pattern in weak_patterns:
+            if re.search(pattern, idea, re.IGNORECASE):
+                has_weak_action = True
+                break
+    
+    # 아이디어 길이 체크
+    min_idea_len = min_lengths.get("idea_one_liner", 15)
+    if len(idea) < min_idea_len:
+        warnings.append(f"아이디어가 짧음 (권장: 더 구체적으로): '{idea}'")
+    
+    # 판정: strong 있으면 PASS, weak만 있으면 warn + PASS, 둘 다 없으면 FAIL
+    if has_strong_action:
+        checks_passed += 1
+    elif has_weak_action:
+        # weak만 있으면 warn 추가하지만 PASS는 시킴
+        warnings.append(f"행동이 범용적 (권장: 더 구체적인 행동으로): '{idea}'")
+        checks_passed += 1
+    else:
+        fail_reasons.append(f"아이디어에 구체적 행동이 없음: '{idea}'")
+    
+    # ─────────────────────────────────────────────────────────────
+    # Check 4: 현재 대안이 있는가? (경고만, 실패 아님)
+    # ─────────────────────────────────────────────────────────────
+    min_alt_len = min_lengths.get("current_alternatives", 10)
+    if not alternatives or len(alternatives) < min_alt_len:
+        warnings.append("현재 대안이 명시되지 않음")
+    else:
+        checks_passed += 1
+    
+    # 점수 계산 (0.0 ~ 1.0, 내부 디버깅용)
+    score = checks_passed / total_checks
+    
+    # 판정: 핵심 3개 중 threshold 이상 실패하면 PreGate FAIL
+    core_fails = len([r for r in fail_reasons if "타깃" in r or "문제" in r or "행동" in r])
+    is_valid = core_fails < core_fail_threshold
+    
+    return PreGateResult(
+        is_valid=is_valid,
+        fail_reasons=fail_reasons,
+        warnings=warnings,
+        score=score,
+    )
+
+
+def _generate_pregate_fail_report(
+    inputs: Dict[str, Any],
+    pregate_result: PreGateResult,
+    out_dir: Path,
+    run_id: str,
+) -> str:
+    """
+    PreGate FAIL 시 생성되는 리포트.
+    사용자에게 무엇이 부족한지, 어떻게 수정하면 좋을지 안내.
+    """
+    report_lines = [
+        "<!--",
+        "╔══════════════════════════════════════════════════════════════════════════════╗",
+        "║                        🎯 GAP FOUNDRY - STEP1 REPORT                         ║",
+        "╠══════════════════════════════════════════════════════════════════════════════╣",
+        f"║  📌 Idea: {inputs.get('idea_one_liner', 'N/A')[:60]:<60} ║",
+        f"║  👥 Target: {inputs.get('target_customer', 'N/A')[:58]:<58} ║",
+        f"║  🕐 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}        |  🔖 Run ID: {run_id[:30]} ║",
+        "╚══════════════════════════════════════════════════════════════════════════════╝",
+        "-->",
+        "",
+        "## 🚦 Validation Gate 결과 요약",
+        "",
+        "### 최종 판정",
+        "**🔴 LANDING_NO**",
+        "",
+        "**사유**: 검증 단위 성립 불가 (모호함/상식 수준)",
+        "",
+        "---",
+        "",
+        "## ❌ PreGate 실패: 초기 검증을 시도하기에 입력이 너무 모호합니다",
+        "",
+        "시장 검증(Landing Test, PoC, Interview 등)을 실행하려면 **구체적인 검증 단위**가 필요합니다.",
+        "현재 입력은 너무 추상적이어서 경쟁 분석이나 초기 실험을 의미 있게 수행할 수 없습니다.",
+        "",
+        "---",
+        "",
+        "## 🔍 부족한 부분",
+        "",
+    ]
+    
+    for i, reason in enumerate(pregate_result.fail_reasons, 1):
+        report_lines.append(f"### {i}. {reason.split(':')[0]}")
+        report_lines.append(reason)
+        report_lines.append("")
+    
+    if pregate_result.warnings:
+        report_lines.append("## ⚠️ 경고 (권장 수정)")
+        report_lines.append("")
+        for warning in pregate_result.warnings:
+            report_lines.append(f"- {warning}")
+        report_lines.append("")
+    
+    # 사용자 입력 기반 리라이트 예시 생성
+    user_idea = inputs.get('idea_one_liner', '건강 앱')
+    user_target = inputs.get('target_customer', '모든 사람')
+    
+    report_lines.extend([
+        "---",
+        "",
+        "## 🔧 이렇게 고쳐보세요",
+        "",
+        "### ❌ 현재 입력 (너무 추상적)",
+        f"- 아이디어: {user_idea}",
+        f"- 타깃: {user_target}",
+        f"- 문제: {inputs.get('problem_statement', '')}",
+        "",
+        "### ✅ 리라이트 예시",
+        "",
+        "**예시 1**: 야근 많은 30대 직장인이 저녁 10시 이후 과식을 줄이게 돕는 앱",
+        "- 타깃: 주 3회 이상 야근하는 30대 사무직",
+        "- 문제: 늦은 퇴근 후 스트레스 해소로 과식 → 체중 증가 → 다음날 후회 반복",
+        "",
+        "**예시 2**: 프리랜서 개발자를 위한 세금 자동 계산 및 신고 대행 서비스",
+        "- 타깃: 연 매출 1억 미만의 1인 프리랜서 개발자",
+        "- 문제: 매년 5월 종합소득세 신고 시 경비 처리가 복잡해서 세무사에게 30-50만원을 내거나 직접 밤새 씨름한다",
+        "",
+        "---",
+        "",
+        "### 다음 단계",
+        "",
+        "`--refine` 옵션으로 대화형 입력 구체화를 사용해보세요:",
+        "```bash",
+        "python3 -m gap_foundry.main --refine",
+        "```",
+        "",
+        "---",
+        "*Generated by [Gap Foundry](https://github.com/utopify/gap_foundry) - AI-powered Market Validation*",
+    ])
+    
+    return "\n".join(report_lines)
 
 
 # ============================================================================
@@ -410,6 +742,7 @@ def _generate_report_header(
     
     # Verdict 이모지
     verdict_emoji = "🟢" if final_verdict == "LANDING_GO" else "🟡" if final_verdict == "LANDING_HOLD" else "🔴" if final_verdict == "LANDING_NO" else "⚪"
+    verdict_msg = "시장 검증 시도 가치 충분" if final_verdict == "LANDING_GO" else "실험 설계 보완 필요" if final_verdict == "LANDING_HOLD" else "입력 구체화/재검토 권장"
     
     # ═══════════════════════════════════════════════════════════════
     # 실행 시간 포맷팅 (SSOT: Single Source of Truth)
@@ -469,10 +802,10 @@ def _generate_report_header(
 
 ---
 
-## 🚦 Landing Gate 결과 요약
+## 🚦 Validation Gate 결과 요약
 
 ### 최종 판정
-**{verdict_emoji} {final_verdict or "판정 대기"}**
+**{verdict_emoji} {final_verdict or "판정 대기"}: {verdict_msg}**
 
 ---
 
@@ -566,12 +899,12 @@ def _parse_verdict_from_text(text: str) -> Optional[str]:
     """
     텍스트에서 VERDICT를 파싱한다.
     
-    새로운 Landing Gate 판정 체계:
-    - LANDING_GO: 광고 실험 진행 가능
-    - LANDING_HOLD: 포커싱 필요
-    - LANDING_NO: 현재 광고 실험 부적합
+    신규 시장검증 게이트 판정 체계:
+    - VALIDATION_GO (또는 LANDING_GO): 초기 검증 시도 가치 충분
+    - VALIDATION_HOLD (또는 LANDING_HOLD): 실험 설계 보완 필요
+    - VALIDATION_NO (또는 LANDING_NO): 검증 단위 미성립
     
-    (레거시 PASS/FAIL도 호환 지원)
+    (내부 로직은 LANDING_* 포맷으로 통일하여 처리)
     
     ⚠️ word boundary (\b) 사용으로 부분 매칭 방지
     """
@@ -580,12 +913,14 @@ def _parse_verdict_from_text(text: str) -> Optional[str]:
     
     # 1) 신규 포맷 우선 (word boundary로 정확한 매칭)
     m = re.search(
-        r"VERDICT\s*:\s*(LANDING_GO|LANDING_HOLD|LANDING_NO)\b",
+        r"VERDICT\s*:\s*(LANDING_GO|LANDING_HOLD|LANDING_NO|VALIDATION_GO|VALIDATION_HOLD|VALIDATION_NO)\b",
         text,
         re.IGNORECASE
     )
     if m:
-        return m.group(1).upper()
+        verdict = m.group(1).upper()
+        # 내부 로직 호환을 위해 VALIDATION -> LANDING 변환
+        return verdict.replace("VALIDATION_", "LANDING_")
     
     # 2) 레거시 포맷 fallback (PASS → GO, FAIL → NO)
     m2 = re.search(r"VERDICT\s*:\s*(PASS|FAIL)\b", text, re.IGNORECASE)
@@ -1002,6 +1337,56 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("Tip: Use --refine (LLM 대화형), --interactive, or --input JSON.\n", file=sys.stderr)
         return 2
 
+    # 4.1) PreGate: 입력 구체성 체크 (Q0와 분리된 개념)
+    # - Q0: 아이디어 '변형' 여부 체크 (Stage A에서 수행)
+    # - PreGate: 입력이 '검증 가능한 단위'인지 체크 (Stage A 전에 수행)
+    pregate_result = _pregate_check(inputs)
+    
+    if not pregate_result.is_valid:
+        print("\n" + "=" * 60)
+        print("🔴 LANDING_NO: 검증 단위 성립 불가 (모호함/상식 수준)")
+        print("=" * 60)
+        print("\n❌ 실패 항목:")
+        for reason in pregate_result.fail_reasons:
+            # 간결하게 첫 줄만 출력
+            first_line = reason.split('\n')[0]
+            print(f"   • {first_line}")
+        if pregate_result.warnings:
+            print("\n⚠️ 경고:")
+            for warning in pregate_result.warnings:
+                first_line = warning.split('\n')[0]
+                print(f"   • {first_line}")
+        print("\n💡 --refine 옵션으로 대화형 입력 구체화를 사용해보세요:")
+        print("   python3 -m gap_foundry.main --refine")
+        
+        # PreGate FAIL 리포트 생성 및 저장
+        out_dir = Path(args.out_dir)
+        run_id = _generate_run_id(inputs)
+        
+        fail_report = _generate_pregate_fail_report(inputs, pregate_result, out_dir, run_id)
+        
+        # 리포트 저장
+        report_dir = out_dir / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        
+        idea_slug = re.sub(r"[^\w가-힣]", "", inputs.get("idea_one_liner", "unknown"))[:15]
+        biz_type = inputs.get("business_type", "B2C")
+        report_filename = f"{datetime.now().strftime('%Y-%m-%d_%H%M')}_{idea_slug}_{biz_type}_report.md"
+        report_path = report_dir / report_filename
+        report_path.write_text(fail_report, encoding="utf-8")
+        
+        print(f"\n📁 리포트 저장: {report_path}")
+        print("=" * 60)
+        
+        return 3  # PreGate FAIL exit code
+    
+    # PreGate 통과 시 경고만 출력
+    if pregate_result.warnings:
+        print("\n⚠️ PreGate 경고 (계속 진행):")
+        for warning in pregate_result.warnings:
+            print(f"   • {warning}")
+        print()
+
     # 4.5) 2-stage 실행 및 revision-only용 기본값 추가 (CrewAI 템플릿 변수 요구 충족)
     # Stage 1에서는 이 값들이 비어있고, Stage 2/pass2에서 채워짐
     inputs.setdefault("previous_positioning_output", "")
@@ -1033,9 +1418,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             for i, task in enumerate(crew.tasks, 1):
                 agent_role = getattr(task.agent, "role", "unknown")
                 print(f"   {i}. {agent_role}")
-        except Exception as e:
+    except Exception as e:
             print(f"   ❌ Crew 구성 실패: {e}", file=sys.stderr)
-            return 1
+        return 1
+
         print("\n✅ Dry-run 완료. 실제 실행하려면 --dry-run 옵션을 제거하세요.")
         return 0
 
@@ -1272,9 +1658,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             crew_stage2, _ = Step1CrewFactory().build_final_report_only(show_progress=True)
             final_result = crew_stage2.kickoff(inputs=report_inputs)
-    except Exception as e:
+        except Exception as e:
             print(f"❌ Stage 2 실행 오류: {e}", file=sys.stderr)
-        return 1
+            return 1
 
         elapsed_time = time.time() - start_time
         final_text = str(final_result)
@@ -1363,27 +1749,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         if re.search(pattern, final_text, re.IGNORECASE):
             safety_violations.append("본문에서 verdict 재선언")
     
-    # 안전장치 4: 코드 전용 섹션 헤더가 본문에 나오면 경고
+    # 안전장치 4: 코드 전용 섹션 헤더가 본문에 나오면 자동 제거
     code_only_headers = [
-        r'##\s*⏱️\s*실행\s*정보',  # 실행 정보는 코드가 삽입
-        r'##\s*🧩\s*검증\s*대상\s*아이디어',  # Idea Anchor는 코드가 삽입
-        r'##\s*🚦\s*Landing\s*Gate\s*결과\s*요약',  # Gate 요약은 코드가 삽입
-        r'##\s*📊\s*토큰/비용\s*통계',  # 토큰/비용은 footer에서
+        (r'##\s*⏱️\s*실행\s*정보.*?(?=\n##|\n---|\Z)', "실행 정보"),
+        (r'##\s*🧩\s*검증\s*대상\s*아이디어.*?(?=\n##|\n---|\Z)', "Idea Anchor"),
+        (r'##\s*🚦\s*Landing\s*Gate\s*결과\s*요약.*?(?=\n##|\n---|\Z)', "Gate 요약"),
+        (r'##\s*📊\s*토큰/비용\s*통계.*?(?=\n##|\n---|\Z)', "토큰/비용"),
+        (r'##\s*📊\s*실행\s*통계.*?(?=\n##|\n---|\Z)', "실행 통계"),
     ]
-    for pattern in code_only_headers:
-        if re.search(pattern, final_text):
-            safety_violations.append(f"코드 전용 섹션 헤더가 본문에 포함")
+    sections_removed = []
+    for pattern, desc in code_only_headers:
+        if re.search(pattern, final_text, re.DOTALL):
+            final_text = re.sub(pattern, '', final_text, flags=re.DOTALL)
+            sections_removed.append(desc)
     
-    # 결과 출력
+    if sections_removed:
+        safety_violations.append(f"중복 섹션 자동 제거: {', '.join(sections_removed)}")
+    
+    # 결과 출력 (중복 섹션 제거는 정보 레벨, 나머지는 경고)
     if safety_violations:
-        print(f"\n{'='*60}", file=sys.stderr)
-        print("⚠️ [LLM 본문 안전 검사 경고]", file=sys.stderr)
-        print(f"{'='*60}", file=sys.stderr)
-        for i, v in enumerate(safety_violations, 1):
-            print(f"  {i}. {v}", file=sys.stderr)
-        print(f"\n   → 위 항목들은 코드가 자동 삽입하므로 LLM이 쓰면 불일치 발생", file=sys.stderr)
-        print(f"   → header/footer의 코드 주입 값이 정확한 값입니다", file=sys.stderr)
-        print(f"{'='*60}\n", file=sys.stderr)
+        # 중복 섹션 제거만 있으면 정보 레벨
+        only_removed = all("자동 제거" in v for v in safety_violations)
+        
+        if only_removed:
+            print(f"\n📋 [LLM 본문 정리] 중복 섹션 제거됨: {', '.join(sections_removed)}", file=sys.stderr)
+        else:
+            print(f"\n{'='*60}", file=sys.stderr)
+            print("⚠️ [LLM 본문 안전 검사 경고]", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            for i, v in enumerate(safety_violations, 1):
+                print(f"  {i}. {v}", file=sys.stderr)
+            print(f"\n   → header/footer의 코드 주입 값이 정확한 값입니다", file=sys.stderr)
+            print(f"{'='*60}\n", file=sys.stderr)
     
     final_text_with_header = report_header + final_text + report_footer
     

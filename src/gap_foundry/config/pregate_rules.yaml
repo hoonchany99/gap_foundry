@@ -1,0 +1,166 @@
+# ============================================================================
+# PreGate Rules Configuration
+# ============================================================================
+# 입력 구체성 체크를 위한 패턴/규칙 정의
+# Q0(Idea Invariance)와 분리: PreGate는 '검증 가능한 단위'인지 체크
+#
+# 수정 시 주의:
+# - 정규식 문법 사용 (Python re 모듈 기준)
+# - 패턴은 대소문자 무시 (re.IGNORECASE 적용됨)
+# ============================================================================
+
+# 최소 길이 기준 (경고용, 하드 FAIL 아님)
+# 짧아도 구체적인 타깃(의사, 간호사)은 allowlist로 예외 처리됨
+min_lengths:
+  target_customer: 2      # 2글자 미만이면 경고 (FAIL 아님)
+  problem_statement: 11   # 10글자 이하면 경고
+  idea_one_liner: 15      # 15자 미만이면 경고
+  current_alternatives: 10 # 대안이 10글자 미만이면 경고
+
+# 짧지만 구체적인 타깃 (allowlist)
+# 이 패턴에 매칭되면 길이가 짧아도 비특정으로 간주하지 않음
+specific_short_targets_allowlist:
+  - "^의사$"
+  - "^간호사$"
+  - "^약사$"
+  - "^교사$"
+  - "^개발자$"
+  - "^디자이너$"
+  - "^작가$"
+  - "^변호사$"
+  - "^회계사$"
+  - "^PD$"
+  - "^기자$"
+  - "^요리사$"
+  - "^소상공인$"
+  - "^프리랜서$"
+  - "^대학생$"
+  - "^취준생$"
+  - "^직장인$"
+  - "^자영업자$"
+  - "^CEO$"
+  - "^CTO$"
+  - "^PM$"
+  - "^마케터$"
+  - "^영업$"
+  # 영어
+  - "^doctors?$"
+  - "^nurses?$"
+  - "^teachers?$"
+  - "^developers?$"
+  - "^designers?$"
+  - "^freelancers?$"
+  - "^founders?$"
+  - "^CEOs?$"
+  - "^CTOs?$"
+  - "^PMs?$"
+
+# 비특정 타깃 패턴 (매칭되면 FAIL)
+# 한국어/영어 모두 지원
+vague_target_patterns:
+  # 한국어
+  - "^모든\\s*사람"
+  - "^누구나"
+  - "^일반인"
+  - "^모두$"
+  - "^사람들$"
+  - "^사용자$"
+  - "^고객$"
+  - "^대중$"
+  - "^전체$"
+  # 영어
+  - "^everyone$"
+  - "^anyone$"
+  - "^all\\s*people"
+  - "^general\\s*public"
+  - "^users$"
+  - "^customers$"
+  - "^people$"
+
+# 상식 수준 문제 패턴 (매칭되면 FAIL)
+# "추상적 주제 + 중요/필요" 조합만 잡음
+# 주의: "불편하다", "힘들다"는 정상 문제 진술에 자주 쓰이므로 제외
+truism_problem_patterns:
+  # 한국어: 추상 명사 + 중요/필요
+  - "(건강|행복|성공|자기계발|시간관리|생산성|효율|웰빙|균형).*(중요하다|필요하다)$"
+  - "^(건강|행복|성공|돈|시간)이\\s*(중요|필요)"
+  - "좋다$"
+  - "나쁘다$"
+  # 영어: 추상 + important/needed
+  - "(health|happiness|success|productivity|efficiency|balance).*(is\\s+important|is\\s+needed|matters)$"
+  - "^(people|everyone|users).*(need|want|like)"
+
+# 행동 포함 여부 체크 패턴 (2레벨 구조)
+action_patterns:
+  # strong: 구체적 행동 (하나라도 있으면 행동 PASS)
+  strong:
+    # 한국어 - 구체적 행동
+    - "자동화"
+    - "계산"
+    - "기록"
+    - "저장"
+    - "분석"
+    - "추천"
+    - "알림"
+    - "예약"
+    - "주문"
+    - "결제"
+    - "매칭"
+    - "비교"
+    - "검색"
+    - "필터"
+    - "정렬"
+    - "요약"
+    - "번역"
+    - "변환"
+    - "동기화"
+    - "백업"
+    # 영어 - 단어 경계 사용
+    - "\\bautomate\\b"
+    - "\\bcalculate\\b"
+    - "\\btrack\\b"
+    - "\\bsave\\b"
+    - "\\banalyze\\b"
+    - "\\brecommend\\b"
+    - "\\bnotify\\b"
+    - "\\bbook\\b"
+    - "\\border\\b"
+    - "\\bmatch\\b"
+    - "\\bcompare\\b"
+    - "\\bsearch\\b"
+    - "\\bfilter\\b"
+    - "\\bsort\\b"
+    - "\\bsummarize\\b"
+    - "\\btranslate\\b"
+    - "\\bconvert\\b"
+    - "\\bsync\\b"
+    - "\\bbackup\\b"
+  
+  # weak: 범용 동사 (단독으로는 행동 PASS 안 됨)
+  # strong 없이 weak만 있으면 warn 처리
+  weak:
+    # 한국어 - 범용 동사
+    - "하는"
+    - "해주는"
+    - "돕는"
+    - "만드는"
+    - "줄이는"
+    - "높이는"
+    - "연결하는"
+    - "제공하는"
+    - "관리"  # 단독 "관리"는 모호할 수 있음
+    # 영어 - 단어 경계 사용
+    - "\\bhelp\\b"
+    - "\\bmake\\b"
+    - "\\breduce\\b"
+    - "\\bincrease\\b"
+    - "\\bconnect\\b"
+    - "\\bprovide\\b"
+    - "\\bmanage\\b"
+
+# 판정 기준
+judgment:
+  # 핵심 체크 중 몇 개 실패해야 PreGate FAIL인가?
+  # 핵심: 타깃, 문제, 행동 (3개)
+  # 기본값: 2개 이상 실패 시 FAIL
+  core_fail_threshold: 2
