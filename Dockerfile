@@ -18,8 +18,8 @@ RUN pip install --no-cache-dir -e .
 # Create outputs directory
 RUN mkdir -p outputs/reports outputs/runs
 
-# Expose port
-EXPOSE 8000
+# Expose port (Fly.io uses PORT env var)
+EXPOSE 8080
 
-# Run the application
-CMD ["uvicorn", "gap_foundry.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application (PORT is set by Fly.io, default 8080)
+CMD uvicorn gap_foundry.api:app --host 0.0.0.0 --port ${PORT:-8080}

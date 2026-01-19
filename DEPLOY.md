@@ -4,7 +4,7 @@
 
 ```
 ┌─────────────────────┐     ┌─────────────────────┐
-│   Vercel (Frontend) │────▶│  Railway (Backend)  │
+│   Vercel (Frontend) │────▶│  Fly.io (Backend)   │
 │   Next.js App       │     │  FastAPI + CrewAI   │
 └─────────────────────┘     └─────────────────────┘
         │                           │
@@ -19,7 +19,51 @@
 
 ---
 
-## 1️⃣ 백엔드 배포 (Railway 추천)
+## 1️⃣ 백엔드 배포 (Fly.io 추천)
+
+### Fly.io 배포 방법
+
+1. **Fly.io CLI 설치**:
+   ```bash
+   # macOS
+   brew install flyctl
+   
+   # 또는
+   curl -L https://fly.io/install.sh | sh
+   ```
+
+2. **로그인**:
+   ```bash
+   fly auth login
+   ```
+
+3. **앱 생성 및 배포**:
+   ```bash
+   cd /Users/hoonchan/Desktop/Utopify/gap_foundry
+   
+   # 앱 생성 (처음만)
+   fly launch --no-deploy
+   
+   # 환경 변수 설정
+   fly secrets set OPENAI_API_KEY=sk-xxxxxxxxxxxxx
+   fly secrets set SERPER_API_KEY=xxxxxxxxxxxxx
+   fly secrets set CORS_ORIGINS=https://your-frontend.vercel.app
+   
+   # 배포
+   fly deploy
+   ```
+
+4. **배포 확인**:
+   ```bash
+   fly status
+   fly logs
+   ```
+
+5. **URL 확인**: `https://gap-foundry-api.fly.dev`
+
+---
+
+## 1️⃣-B 백엔드 배포 (Railway 대안)
 
 ### Railway 배포 방법
 
