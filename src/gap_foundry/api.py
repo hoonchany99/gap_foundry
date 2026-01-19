@@ -45,10 +45,13 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS 설정 (개발용 - 프로덕션에서는 origin 제한 필요)
+# CORS 설정 (환경 변수로 origin 설정 가능)
+import os
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],  # Next.js 개발 서버
+    allow_origins=CORS_ORIGINS,  # 환경변수: CORS_ORIGINS=https://your-frontend.vercel.app
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -451,6 +454,139 @@ def run_validation_job(run_id: str, inputs: Dict[str, Any]):
     main.py의 run_gap_foundry_engine을 호출하며,
     진행 상태를 jobs dict에 업데이트합니다.
     """
+    import threading
+    import time as time_module
+    
+    # 진행률 추정을 위한 모니터링 스레드
+    def monitor_progress():
+        """outputs/runs 폴더를 모니터링하여 진행률 추정 (세부 단위)"""
+        
+        # 12단계 × 세부 진행률 (시작%, 완료%, 단계명, 상세)
+        stage_details = {
+            "01_": {
+                "base": 8, "complete": 15, 
+                "name": "🔍 경쟁사 발굴", 
+                "steps": ["검색 시작", "결과 수집 중", "후보 목록 작성"]
+            },
+            "02_": {
+                "base": 16, "complete": 22,
+                "name": "📊 경쟁사 압축",
+                "steps": ["중요도 평가", "상위 경쟁사 선별", "압축 완료"]
+            },
+            "03_": {
+                "base": 23, "complete": 32,
+                "name": "🌐 채널 분석",
+                "steps": ["웹사이트 스크래핑", "콘텐츠 추출", "채널 정보 정리"]
+            },
+            "04_": {
+                "base": 33, "complete": 42,
+                "name": "💎 가치제안 추출",
+                "steps": ["Hero 카피 분석", "USP 식별", "VP 정리 완료"]
+            },
+            "05_": {
+                "base": 43, "complete": 50,
+                "name": "📝 채널/VP 요약",
+                "steps": ["데이터 통합", "요약 생성"]
+            },
+            "06_": {
+                "base": 51, "complete": 60,
+                "name": "🕳️ 빈틈 발굴",
+                "steps": ["Gap 가설 생성", "검증 신호 도출", "빈틈 목록 완성"]
+            },
+            "07_": {
+                "base": 61, "complete": 68,
+                "name": "📋 리서치 요약",
+                "steps": ["전체 리서치 통합", "핵심 인사이트 정리"]
+            },
+            "08_": {
+                "base": 69, "complete": 76,
+                "name": "🎯 POV/포지셔닝",
+                "steps": ["포지셔닝 설계", "메시지 프레이밍", "POV 완성"]
+            },
+            "09_": {
+                "base": 77, "complete": 84,
+                "name": "🔴 Red Team 검토",
+                "steps": ["Q0-Q5 평가", "점수 계산", "1차 판정"]
+            },
+            "10_": {
+                "base": 85, "complete": 88,
+                "name": "✏️ 포지셔닝 수정",
+                "steps": ["피드백 반영", "수정 완료"]
+            },
+            "11_": {
+                "base": 89, "complete": 92,
+                "name": "🔴 Red Team 재검토",
+                "steps": ["최종 검토", "VERDICT 결정"]
+            },
+            "12_": {
+                "base": 93, "complete": 98,
+                "name": "📄 리포트 생성",
+                "steps": ["리포트 작성", "헤더/푸터 삽입", "파일 저장"]
+            },
+        }
+        
+        last_progress = 0
+        
+        # 절대 경로 사용 (상대 경로 문제 해결)
+        base_dir = Path(__file__).parent.parent.parent / "outputs" / "runs"
+        
+        while run_id in jobs and jobs[run_id]["status"] not in ["completed", "failed", "pregate_failed"]:
+            # pass1 또는 stage1 폴더 확인
+            for suffix in ["_pass1", "_stage1", ""]:
+                run_dir = base_dir / f"{run_id}{suffix}"
+                if run_dir.exists():
+                    files = list(run_dir.glob("*.md"))
+                    dirs = list(run_dir.glob("*_"))  # 진행 중인 폴더 (끝이 _)
+                    all_items = list(run_dir.iterdir())
+                    
+                    current_progress = 15  # 기본값: 리서치 시작
+                    current_step = "🔍 리서치 시작..."
+                    
+                    # 완료된 파일 기준 진행률
+                    for f in files:
+                        for prefix, details in stage_details.items():
+                            if f.name.startswith(prefix):
+                                if details["complete"] > current_progress:
+                                    current_progress = details["complete"]
+                                    current_step = f"{details['name']} ✅ 완료"
+                    
+                    # 진행 중인 폴더 체크 (더 세부적인 진행률)
+                    for d in all_items:
+                        if d.is_dir():
+                            for prefix, details in stage_details.items():
+                                if d.name.startswith(prefix):
+                                    # 폴더가 있으면 해당 단계 진행 중
+                                    in_progress = details["base"] + (details["complete"] - details["base"]) // 2
+                                    if in_progress > current_progress:
+                                        current_progress = in_progress
+                                        step_idx = min(1, len(details["steps"]) - 1)
+                                        current_step = f"{details['name']} - {details['steps'][step_idx]}"
+                    
+                    # 파일 개수로 세부 진행률 조정
+                    file_count = len(files)
+                    if file_count > 0:
+                        # 파일 1개당 약 7-8% 진행
+                        file_based_progress = 15 + (file_count * 7)
+                        if file_based_progress > current_progress:
+                            current_progress = min(file_based_progress, 95)
+                    
+                    # 상태 업데이트 (변화가 있을 때만)
+                    if current_progress > last_progress:
+                        last_progress = current_progress
+                        
+                        if current_progress < 50:
+                            status = JobStatus.RESEARCHING
+                        elif current_progress < 85:
+                            status = JobStatus.ANALYZING
+                        else:
+                            status = JobStatus.GENERATING_REPORT
+                        
+                        _update_job_status(run_id, status, current_progress, current_step)
+                        # 로그는 _update_job_status 내에서 자동 추가됨
+                    break
+            
+            time_module.sleep(2)  # 2초마다 체크 (더 빠르게)
+    
     try:
         # PreGate 체크
         _update_job_status(run_id, JobStatus.PREGATE_CHECKING, 5, "입력 구체성 검사 중...")
@@ -468,8 +604,12 @@ def run_validation_job(run_id: str, inputs: Dict[str, Any]):
             )
             return
         
-        # 리서치 단계
-        _update_job_status(run_id, JobStatus.RESEARCHING, 15, "경쟁사 리서치 중...")
+        # 리서치 단계 시작 (실제 진행률은 CrewAI 콜백에서 업데이트됨)
+        _update_job_status(run_id, JobStatus.RESEARCHING, 5, "리서치 준비 중...")
+        
+        # 진행률 모니터링 스레드 시작
+        monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
+        monitor_thread.start()
         
         # Args 객체 생성 (main.py 호환)
         class WebArgs:
@@ -484,20 +624,23 @@ def run_validation_job(run_id: str, inputs: Dict[str, Any]):
         
         args = WebArgs()
         
-        # 진행 상태 업데이트 콜백 (향후 확장용)
-        def progress_callback(step: str, progress: int):
-            if "경쟁사" in step or "discover" in step.lower():
-                _update_job_status(run_id, JobStatus.RESEARCHING, progress, step)
-            elif "분석" in step or "analyze" in step.lower():
-                _update_job_status(run_id, JobStatus.ANALYZING, progress, step)
-            elif "리포트" in step or "report" in step.lower():
-                _update_job_status(run_id, JobStatus.GENERATING_REPORT, progress, step)
+        # 진행 상태 업데이트 콜백 (CrewAI 콜백과 연결)
+        # 진행률 범위: PreGate(0~5%) → 태스크들(5~95%) → 리포트(95~100%)
+        def progress_callback(task_id: str, status: str, progress: int, step: str):
+            """태스크별 진행 상태를 API jobs dict에 업데이트"""
+            # 진행률에 따라 상태 결정
+            if progress < 50:
+                job_status = JobStatus.RESEARCHING  # 5~50%: 리서치 중
+            elif progress < 85:
+                job_status = JobStatus.ANALYZING    # 50~85%: 분석 중
+            else:
+                job_status = JobStatus.GENERATING_REPORT  # 85~100%: 리포트 생성
+            
+            _update_job_status(run_id, job_status, progress, step)
+            # 로그는 _update_job_status 내에서 자동 추가됨
         
-        # 단계별 진행 상태 시뮬레이션 (실제로는 crew 내부에서 콜백 호출 필요)
-        _update_job_status(run_id, JobStatus.RESEARCHING, 20, "경쟁사 발굴 중...")
-        
-        # 엔진 실행
-        exit_code = run_gap_foundry_engine(inputs, args, custom_run_id=run_id)
+        # 엔진 실행 (콜백 전달)
+        exit_code = run_gap_foundry_engine(inputs, args, custom_run_id=run_id, progress_callback=progress_callback)
         
         if exit_code == 0:
             # 성공 - 리포트 경로 찾기

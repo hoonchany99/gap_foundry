@@ -31,7 +31,14 @@ class ProgressTracker:
         "final_step1_report": ("📝", "최종 리포트 작성", "2~3분", "Go/No-Go 결론 도출"),
     }
     
-    def __init__(self, task_order: List[str], include_revision: bool = False, is_revision: bool = False):
+    # 단계별 진행률 범위 설정
+    STAGE_PROGRESS = {
+        "pass1": (5, 70),       # Pass 1: 5% → 70%
+        "revision": (70, 85),   # Revision: 70% → 85%
+        "final_report": (85, 100),  # Final Report: 85% → 100%
+    }
+    
+    def __init__(self, task_order: List[str], include_revision: bool = False, is_revision: bool = False, external_callback: Callable = None, stage: str = "pass1"):
         self.task_order = task_order
         self.total_tasks = len(task_order)
         self.current_task_idx = 0
@@ -40,6 +47,8 @@ class ProgressTracker:
         self.start_time = time.time()
         self.include_revision = include_revision
         self.is_revision = is_revision
+        self.external_callback = external_callback  # API 연동용 외부 콜백
+        self.stage = stage  # 현재 단계 (pass1, revision, final_report)
         
     def _get_label(self, task_id: str) -> Tuple[str, str, str, str]:
         """태스크 ID에 대한 (이모지, 한글명, 예상시간, 설명) 반환"""
@@ -95,6 +104,19 @@ class ProgressTracker:
         print(f"  💡 {desc}")
         print(f"  ⏱️ 예상: {est_time} | 경과: {elapsed_str}")
         print(f"{'─' * 65}")
+        
+        # 외부 콜백 호출 (API 연동)
+        # 단계별 진행률 범위 사용
+        if self.external_callback:
+            base_progress, max_progress = self.STAGE_PROGRESS.get(self.stage, (5, 95))
+            task_progress_range = max_progress - base_progress
+            progress_percent = base_progress + int((self.current_task_idx / self.total_tasks) * task_progress_range)
+            self.external_callback(
+                task_id=task_id,
+                status="started",
+                progress=progress_percent,
+                step=f"{emoji} {label} 시작...",
+            )
     
     def on_task_end(self, task_id: str, output_preview: str = ""):
         """태스크 완료 시 호출"""
@@ -110,6 +132,19 @@ class ProgressTracker:
         result_summary = self._extract_result_summary(task_id, output_preview)
         
         print(f"\n✅ {emoji} {label} 완료 ({duration_str})")
+        
+        # 외부 콜백 호출 (API 연동)
+        # 단계별 진행률 범위 사용
+        if self.external_callback:
+            base_progress, max_progress = self.STAGE_PROGRESS.get(self.stage, (5, 95))
+            task_progress_range = max_progress - base_progress
+            progress_percent = base_progress + int((self.current_task_idx / self.total_tasks) * task_progress_range)
+            self.external_callback(
+                task_id=task_id,
+                status="completed",
+                progress=progress_percent,
+                step=f"{emoji} {label} ✅ 완료",
+            )
         if result_summary:
             print(f"   └─ 📌 {result_summary}")
         
@@ -715,16 +750,16 @@ class Step1CrewFactory:
 
                 # 모든 의존 task가 이미 생성되었는지 확인
                 if all(c in tasks for c in ctx_ids):
-            agent_key = task_cfg.get("agent")
+                    agent_key = task_cfg.get("agent")
                     if agent_key not in all_agents:
-                raise KeyError(
+                        raise KeyError(
                             f"Task '{task_id}' references unknown agent '{agent_key}'. "
                             f"Known agents: {list(all_agents.keys())}"
                 )
 
                     context_tasks = [tasks[c] for c in ctx_ids]
 
-            tasks[task_id] = Task(
+                    tasks[task_id] = Task(
                         description=task_cfg.get("description", "") or "",
                         expected_output=task_cfg.get("expected_output", "") or "",
                         agent=all_agents[agent_key],
@@ -754,6 +789,7 @@ class Step1CrewFactory:
         self, 
         include_revision: bool = False,
         show_progress: bool = True,
+        external_callback: Callable = None,
     ) -> Tuple[Crew, Optional[ProgressTracker]]:
         """
         STEP1 Crew를 빌드한다.
@@ -761,6 +797,7 @@ class Step1CrewFactory:
         Args:
             include_revision: True면 revision 태스크 포함 (revise_positioning, red_team_recheck)
             show_progress: True면 진행 상황 표시용 ProgressTracker 반환
+            external_callback: API 연동용 외부 콜백 함수 (task_id, status, progress, step 인자)
         
         Returns:
             (Crew, ProgressTracker) 또는 (Crew, None)
@@ -808,8 +845,8 @@ class Step1CrewFactory:
                 f"Available tasks: {list(tasks.keys())}"
             )
 
-        # 진행 상황 추적기
-        tracker = ProgressTracker(task_order, include_revision) if show_progress else None
+        # 진행 상황 추적기 (외부 콜백 포함) - Pass 1: 5~70%
+        tracker = ProgressTracker(task_order, include_revision, external_callback=external_callback, stage="pass1") if show_progress else None
 
         # 콜백 설정
         step_callback = _make_step_callback(tracker) if tracker else None
@@ -832,6 +869,7 @@ class Step1CrewFactory:
     def build_revision_only(
         self,
         show_progress: bool = False,
+        external_callback: Callable = None,
     ) -> Tuple[Crew, Optional["ProgressTracker"]]:
         """
         Revision 태스크만 실행하는 Crew를 빌드한다 (final_report 제외).
@@ -864,9 +902,9 @@ class Step1CrewFactory:
                 f"Available tasks: {list(tasks.keys())}"
             )
 
-        # Progress tracker 설정
-        tracker = ProgressTracker(task_order, is_revision=True) if show_progress else None
-        step_callback = tracker.on_task_start if tracker else None
+        # Progress tracker 설정 - Revision: 70~85%
+        tracker = ProgressTracker(task_order, is_revision=True, external_callback=external_callback, stage="revision") if show_progress else None
+        step_callback = _make_step_callback(tracker) if tracker else None
         task_callback = _make_task_callback(tracker) if tracker else None
 
         # Sequential 프로세스 (revision-only도 동일)
@@ -885,6 +923,7 @@ class Step1CrewFactory:
         self,
         include_revision: bool = False,
         show_progress: bool = False,
+        external_callback: Callable = None,
     ) -> Tuple[Crew, Optional["ProgressTracker"]]:
         """
         final_step1_report 없이 나머지 태스크만 실행하는 Crew를 빌드한다.
@@ -893,6 +932,7 @@ class Step1CrewFactory:
         Args:
             include_revision: True면 revision 태스크 포함
             show_progress: True면 진행 상황 표시
+            external_callback: API 연동용 외부 콜백 함수
         """
         manager, workers = self.create_agents()
 
@@ -931,7 +971,8 @@ class Step1CrewFactory:
         if missing:
             raise KeyError(f"task_order contains unknown task ids: {missing}")
 
-        tracker = ProgressTracker(task_order, include_revision) if show_progress else None
+        # Pass 1: 5~70%
+        tracker = ProgressTracker(task_order, include_revision, external_callback=external_callback, stage="pass1") if show_progress else None
         step_callback = _make_step_callback(tracker) if tracker else None
         task_callback = _make_task_callback(tracker) if tracker else None
 
@@ -967,7 +1008,8 @@ class Step1CrewFactory:
         # final_step1_report만 생성 (context 필터링으로 빈 context가 됨)
         tasks = self.create_tasks(workers, manager, allowed_task_ids=task_order)
         
-        tracker = ProgressTracker(task_order) if show_progress else None
+        # Final Report: 85~100%
+        tracker = ProgressTracker(task_order, stage="final_report") if show_progress else None
         step_callback = _make_step_callback(tracker) if tracker else None
         task_callback = _make_task_callback(tracker) if tracker else None
 

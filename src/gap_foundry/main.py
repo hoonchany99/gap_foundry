@@ -775,15 +775,6 @@ def _generate_report_header(
 ╚══════════════════════════════════════════════════════════════════════════════╝
 -->
 
-## ⏱️ 실행 정보 (자동 생성)
-
-- **총 실행 시간**: {elapsed_str}
-- **실행 시작**: {run_started_at or "N/A"}
-- **실행 종료**: {run_finished_at or "N/A"}
-- **포함 단계**:
-{stage_times_str}
----
-
 ## 🧩 검증 대상 아이디어 (Idea Anchor)
 
 - **아이디어 원문**  
@@ -813,8 +804,14 @@ def _generate_report_header(
     return header
 
 
-def _generate_report_footer(metrics: Dict[str, Any]) -> str:
-    """리포트 푸터 생성 (토큰/비용만 - 시간은 상단 헤더에서 표시)"""
+def _generate_report_footer(
+    metrics: Dict[str, Any],
+    run_started_at: str = "",
+    run_finished_at: str = "",
+    total_elapsed: float = 0,
+    stage_times: Optional[Dict[str, float]] = None,
+) -> str:
+    """리포트 푸터 생성 (실행 정보 + 토큰/비용 - 맨 마지막에 표시)"""
     tokens = metrics.get("tokens", {})
     total_tokens = tokens.get("total_tokens", 0)
     prompt_tokens = tokens.get("prompt_tokens", 0)
@@ -822,11 +819,37 @@ def _generate_report_footer(metrics: Dict[str, Any]) -> str:
     requests = tokens.get("successful_requests", 0)
     cost = metrics.get("estimated_cost_usd", 0)
     
+    # 실행 시간 포맷팅
+    if total_elapsed > 0:
+        mins = int(total_elapsed // 60)
+        secs = int(total_elapsed % 60)
+        elapsed_str = f"{mins}분 {secs}초 ({total_elapsed:.1f}초)"
+    else:
+        elapsed_str = "N/A"
+    
+    # Stage별 시간 문자열
+    stage_times_str = ""
+    if stage_times:
+        for stage_name, stage_sec in stage_times.items():
+            stage_mins = int(stage_sec // 60)
+            stage_secs = int(stage_sec % 60)
+            stage_times_str += f"  - {stage_name}: {stage_mins}분 {stage_secs}초\n"
+    else:
+        stage_times_str = "  - N/A\n"
+    
     footer = f"""
 
 ---
 
-## 📊 토큰/비용 통계
+## 📊 실행 정보 & 비용
+
+### ⏱️ 실행 시간
+- **총 실행 시간**: {elapsed_str}
+- **실행 시작**: {run_started_at or "N/A"}
+- **실행 종료**: {run_finished_at or "N/A"}
+- **포함 단계**:
+{stage_times_str}
+### 💰 토큰/비용 통계
 
 | 항목 | 값 |
 |------|-----|
@@ -1266,9 +1289,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
 
-def run_gap_foundry_engine(inputs: Dict[str, Any], args: argparse.Namespace, custom_run_id: Optional[str] = None) -> int:
+def run_gap_foundry_engine(
+    inputs: Dict[str, Any], 
+    args: argparse.Namespace, 
+    custom_run_id: Optional[str] = None,
+    progress_callback: Optional[Callable] = None,
+) -> int:
     """
     Gap Foundry 핵심 엔진 (JSON/Dict 입력을 받아 리포트 생성)
+    
+    Args:
+        inputs: 아이디어 입력 데이터
+        args: 실행 옵션
+        custom_run_id: 커스텀 실행 ID (웹 API용)
+        progress_callback: 진행 상태 업데이트 콜백 (task_id, status, progress, step)
     """
     # 1) PreGate: 입력 구체성 체크
     pregate_result = _pregate_check(inputs)
@@ -1336,7 +1370,7 @@ def run_gap_foundry_engine(inputs: Dict[str, Any], args: argparse.Namespace, cus
         print("\n🔍 Pass 1: 리서치 + Landing Gate 판정...")
         start_time_pass1 = time.time()
         crew_pass1, tracker = Step1CrewFactory().build_without_final_report(
-            include_revision=False, show_progress=True
+            include_revision=False, show_progress=True, external_callback=progress_callback
         )
         pass1_result = crew_pass1.kickoff(inputs=inputs)
         elapsed_pass1 = time.time() - start_time_pass1
@@ -1358,7 +1392,7 @@ def run_gap_foundry_engine(inputs: Dict[str, Any], args: argparse.Namespace, cus
             revision_inputs = {**inputs, **pass1_outputs}
             
             start_time_pass2 = time.time()
-            crew_pass2, _ = Step1CrewFactory().build_revision_only(show_progress=True)
+            crew_pass2, _ = Step1CrewFactory().build_revision_only(show_progress=True, external_callback=progress_callback)
             pass2_result = crew_pass2.kickoff(inputs=revision_inputs)
             elapsed_pass2 = time.time() - start_time_pass2
             stage_times["Pass 2 (Revision)"] = elapsed_pass2
@@ -1435,7 +1469,13 @@ def run_gap_foundry_engine(inputs: Dict[str, Any], args: argparse.Namespace, cus
         run_started_at=run_started_at_iso, run_finished_at=run_finished_at_iso,
         total_elapsed=total_elapsed, stage_times=stage_times, final_verdict=final_verdict
     )
-    report_footer = _generate_report_footer(metrics) if metrics else ""
+    report_footer = _generate_report_footer(
+        metrics=metrics,
+        run_started_at=run_started_at_iso,
+        run_finished_at=run_finished_at_iso,
+        total_elapsed=total_elapsed,
+        stage_times=stage_times,
+    ) if metrics else ""
     
     # 본문 클리닝 (중복 섹션 제거 등)
     code_only_headers = [
