@@ -152,11 +152,54 @@ class ReportResponse(BaseModel):
 
 
 # ============================================================================
-# 인메모리 상태 저장소 (프로덕션에서는 Redis/DB 권장)
+# 상태 저장소 및 영속성 (서버 재시작 대응)
 # ============================================================================
 
+JOBS_FILE = Path("outputs/jobs.json")
 jobs: Dict[str, Dict[str, Any]] = {}
 job_logs: Dict[str, List[str]] = {}  # SSE용 로그
+
+
+def _save_jobs():
+    """작업 상태를 파일에 저장"""
+    try:
+        JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # JSON 직렬화가 안 되는 객체 방지
+        serializable_jobs = {}
+        for k, v in jobs.items():
+            serializable_jobs[k] = v.copy()
+            # 혹시 모를 비직렬화 데이터 제거
+        
+        with open(JOBS_FILE, "w", encoding="utf-8") as f:
+            json.dump(serializable_jobs, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[ERROR] Failed to save jobs: {e}")
+
+
+def _load_jobs():
+    """파일에서 작업 상태 로드"""
+    global jobs
+    if JOBS_FILE.exists():
+        try:
+            with open(JOBS_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                # 서버 재시작 시 진행 중이던 작업은 FAILED로 표시 (프로세스가 죽었으므로)
+                for jid, jdata in loaded.items():
+                    if jdata["status"] not in [
+                        JobStatus.COMPLETED.value, 
+                        JobStatus.FAILED.value, 
+                        JobStatus.PREGATE_FAILED.value
+                    ]:
+                        jdata["status"] = JobStatus.FAILED.value
+                        jdata["error_message"] = "서버 재시작으로 인해 작업이 중단되었습니다. 다시 시도해주세요."
+                jobs.update(loaded)
+        except Exception as e:
+            print(f"[ERROR] Failed to load jobs: {e}")
+
+
+@app.on_event("startup")
+async def startup_event():
+    _load_jobs()
 
 
 def _update_job_status(
@@ -191,6 +234,9 @@ def _update_job_status(
     if run_id not in job_logs:
         job_logs[run_id] = []
     job_logs[run_id].append(log_msg)
+
+    # 파일에 저장
+    _save_jobs()
 
 
 # ============================================================================

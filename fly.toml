@@ -26,4 +26,4 @@ primary_region = "nrt"  # 도쿄 (한국에서 가장 가까움)
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory_mb = 512
+  memory_mb = 1024
