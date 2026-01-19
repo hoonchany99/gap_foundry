@@ -1153,7 +1153,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--input",
         type=str,
         default="",
-        help="Path to input JSON file. If omitted, uses CLI args or interactive prompts.",
+        help="Path to input JSON file. If omitted, uses CLI args.",
     )
     parser.add_argument("--idea", type=str, default="", help="One-liner idea")
     parser.add_argument("--target", type=str, default="", help="Target customer")
@@ -1183,32 +1183,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         type=str,
         default="outputs",
         help="Directory to save per-task outputs (default: outputs).",
-    )
-
-    parser.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Prompt for missing fields interactively.",
-    )
-
-    parser.add_argument(
-        "--refine",
-        type=str,
-        nargs="?",
-        const="",
-        default=None,
-        help="LLM 기반 입력 구체화 모드. 아이디어를 자유롭게 설명하면 필요한 정보를 자동 추출/질문. "
-             "초기 아이디어를 인자로 전달 가능 (예: --refine '고객 인터뷰 자동 요약 툴')",
-    )
-
-    parser.add_argument(
-        "--save-refined",
-        type=str,
-        nargs="?",
-        const="inputs/last_refined.json",
-        default=None,
-        help="--refine 결과를 자동으로 JSON 파일에 저장. "
-             "경로 미지정 시 기본값: inputs/last_refined.json",
     )
 
     parser.add_argument(
@@ -1250,60 +1224,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     inputs: Dict[str, Any] = {}
 
-    # 0) LLM 기반 입력 구체화 모드 (--refine)
-    if args.refine is not None:
-        initial_idea = args.refine if args.refine else None
-        refine_result = refine_inputs(initial_idea)
-        
-        if not refine_result:
-            print("입력 구체화가 취소되었습니다.", file=sys.stderr)
-            return 2
-        
-        inputs = refine_result.get("inputs", {})
-        confidence_flags = refine_result.get("confidence_flags", {})
-        turns_used = refine_result.get("turns_used", 0)
-        
-        # 모호한 필드 경고
-        ambiguous_fields = [k for k, v in confidence_flags.items() if v == "ambiguous"]
-        if ambiguous_fields:
-            print(f"⚠️  일부 필드가 모호할 수 있어요: {ambiguous_fields}")
-            print("   결과를 해석할 때 참고하세요.\n")
-        
-        print(f"📊 입력 구체화 완료 (턴 수: {turns_used})\n")
-        
-        # refine 결과 저장
-        save_data = {
-            "inputs": inputs,
-            "confidence_flags": confidence_flags,
-            "turns_used": turns_used,
-        }
-        
-        # --save-refined 옵션이 있으면 자동 저장
-        if args.save_refined:
-            save_path = Path(args.save_refined)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            save_path.write_text(
-                json.dumps(save_data, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-            print(f"💾 자동 저장됨: {save_path}\n")
-        else:
-            # 수동으로 저장할지 물어봄
-            print("💾 입력값을 JSON 파일로 저장하시겠어요? (파일명 입력, 건너뛰려면 Enter)")
-            user_save_path = input("   파일명 (예: my_idea.json): ").strip()
-            if user_save_path:
-                if not user_save_path.endswith(".json"):
-                    user_save_path += ".json"
-                Path(user_save_path).write_text(
-                    json.dumps(save_data, ensure_ascii=False, indent=2),
-                    encoding="utf-8"
-                )
-                print(f"   ✅ 저장됨: {user_save_path}\n")
-
-    # 1) JSON 파일 입력 (--refine과 병행 가능: refine 결과를 오버라이드)
+    # 1) JSON 파일 입력
     if args.input:
         loaded = _load_inputs_from_json(Path(args.input))
-        inputs = {**inputs, **loaded}  # refine 결과 위에 JSON 오버라이드
+        inputs = {**inputs, **loaded}
 
     # 2) CLI args로 오버라이드/보완
     cli_map = {
@@ -1325,21 +1249,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not inputs.get(k):
             inputs[k] = default_val
 
-    # 3) 인터랙티브로 누락 채우기
-    if args.interactive:
-        inputs = _prompt_missing_fields(inputs)
-
-    # 4) 검증
+    # 3) 검증
     try:
         _validate_inputs(inputs)
     except Exception as e:
         print(f"❌ Input error: {e}\n", file=sys.stderr)
-        print("Tip: Use --refine (LLM 대화형), --interactive, or --input JSON.\n", file=sys.stderr)
         return 2
 
-    # 4.1) PreGate: 입력 구체성 체크 (Q0와 분리된 개념)
-    # - Q0: 아이디어 '변형' 여부 체크 (Stage A에서 수행)
-    # - PreGate: 입력이 '검증 가능한 단위'인지 체크 (Stage A 전에 수행)
+    # 4) 엔진 실행
+    try:
+        return run_gap_foundry_engine(inputs, args)
+    except Exception as e:
+        print(f"❌ Execution error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+def run_gap_foundry_engine(inputs: Dict[str, Any], args: argparse.Namespace, custom_run_id: Optional[str] = None) -> int:
+    """
+    Gap Foundry 핵심 엔진 (JSON/Dict 입력을 받아 리포트 생성)
+    """
+    # 1) PreGate: 입력 구체성 체크
     pregate_result = _pregate_check(inputs)
     
     if not pregate_result.is_valid:
@@ -1348,27 +1279,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("=" * 60)
         print("\n❌ 실패 항목:")
         for reason in pregate_result.fail_reasons:
-            # 간결하게 첫 줄만 출력
             first_line = reason.split('\n')[0]
             print(f"   • {first_line}")
-        if pregate_result.warnings:
-            print("\n⚠️ 경고:")
-            for warning in pregate_result.warnings:
-                first_line = warning.split('\n')[0]
-                print(f"   • {first_line}")
-        print("\n💡 --refine 옵션으로 대화형 입력 구체화를 사용해보세요:")
-        print("   python3 -m gap_foundry.main --refine")
         
         # PreGate FAIL 리포트 생성 및 저장
         out_dir = Path(args.out_dir)
-        run_id = _generate_run_id(inputs)
-        
+        run_id = custom_run_id or _generate_run_id(inputs)
         fail_report = _generate_pregate_fail_report(inputs, pregate_result, out_dir, run_id)
         
-        # 리포트 저장
         report_dir = out_dir / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
-        
         idea_slug = re.sub(r"[^\w가-힣]", "", inputs.get("idea_one_liner", "unknown"))[:15]
         biz_type = inputs.get("business_type", "B2C")
         report_filename = f"{datetime.now().strftime('%Y-%m-%d_%H%M')}_{idea_slug}_{biz_type}_report.md"
@@ -1377,426 +1297,169 @@ def main(argv: Optional[list[str]] = None) -> int:
         
         print(f"\n📁 리포트 저장: {report_path}")
         print("=" * 60)
-        
         return 3  # PreGate FAIL exit code
     
-    # PreGate 통과 시 경고만 출력
-    if pregate_result.warnings:
-        print("\n⚠️ PreGate 경고 (계속 진행):")
-        for warning in pregate_result.warnings:
-            print(f"   • {warning}")
-        print()
-
-    # 4.5) 2-stage 실행 및 revision-only용 기본값 추가 (CrewAI 템플릿 변수 요구 충족)
-    # Stage 1에서는 이 값들이 비어있고, Stage 2/pass2에서 채워짐
+    # 2) 2-stage 실행 및 revision-only용 기본값 추가
     inputs.setdefault("previous_positioning_output", "")
     inputs.setdefault("previous_red_team_output", "")
     inputs.setdefault("research_summary", "")
     inputs.setdefault("gap_hypotheses", "")
-    inputs.setdefault("landing_gate_verdict", "")  # 2-stage 실행 시 Stage 2에서 사용
+    inputs.setdefault("landing_gate_verdict", "")
 
-    # 5) Dry-run 모드
+    # 3) Dry-run 모드
     if args.dry_run:
         print("\n" + "=" * 60)
-        print("🔍 DRY-RUN MODE (실행 없이 설정 확인)")
+        print("🔍 DRY-RUN MODE")
         print("=" * 60)
-        print("\n📋 입력값:")
-        for k, v in inputs.items():
-            print(f"   {k}: {v}")
-        print("\n🔧 환경변수:")
-        print(f"   SERPER_API_KEY: {'✅ 설정됨' if os.getenv('SERPER_API_KEY') else '❌ 미설정'}")
-        print(f"   OPENAI_API_KEY: {'✅ 설정됨' if os.getenv('OPENAI_API_KEY') else '❌ 미설정'}")
-        print(f"   MAIN_LLM_MODEL: {os.getenv('MAIN_LLM_MODEL', 'gpt-4.1 (기본값)')}")
-        print(f"   FAST_LLM_MODEL: {os.getenv('FAST_LLM_MODEL', 'gpt-4.1-mini (기본값)')}")
-        print(f"   NANO_LLM_MODEL: {os.getenv('NANO_LLM_MODEL', 'gpt-4.1-nano (기본값, 미사용)')}")
-        print("\n🏗️  Crew 구성 테스트...")
         try:
             crew, tracker = Step1CrewFactory().build(show_progress=False)
             print(f"   ✅ 에이전트 {len(crew.agents)}개 생성됨")
             print(f"   ✅ 태스크 {len(crew.tasks)}개 생성됨")
-            print("\n📝 태스크 실행 순서:")
-            for i, task in enumerate(crew.tasks, 1):
-                agent_role = getattr(task.agent, "role", "unknown")
-                print(f"   {i}. {agent_role}")
-    except Exception as e:
+            return 0
+        except Exception as e:
             print(f"   ❌ Crew 구성 실패: {e}", file=sys.stderr)
-        return 1
+            return 1
 
-        print("\n✅ Dry-run 완료. 실제 실행하려면 --dry-run 옵션을 제거하세요.")
-        return 0
-
-    # 6) 실행
+    # 4) 실행 준비
     out_dir = Path(args.out_dir)
-    run_id = _generate_run_id(inputs)
-    
-    # ═══════════════════════════════════════════════════════════════
-    # 전체 Run 실행 시간 추적 (모든 Stage/Pass 포함)
-    # ═══════════════════════════════════════════════════════════════
+    run_id = custom_run_id or _generate_run_id(inputs)
     run_started_at = time.time()
     run_started_at_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    stage_times: Dict[str, float] = {}  # 각 Stage별 소요 시간
+    stage_times: Dict[str, float] = {}
     
-    # 기본값 초기화 (나중에 덮어쓰기됨)
-    total_elapsed: float = 0
-    run_finished_at_iso: str = ""
     final_verdict: str = ""
     final_text: str = ""
-    elapsed_time: float = 0
-    verdict: str = ""
 
-    # --auto-revise: 2-stage 실행 (Stage A: 판정, Stage B: 리포트)
+    # 5) 메인 워크플로우 (Auto-Revise 또는 Standard)
     if args.auto_revise:
-        print("\n🔄 Auto-Revise 모드 (2-stage)")
-        print("=" * 60)
-        
-        # ═══════════════════════════════════════════════════════════════
-        # Stage A: 판정 생성 (final_report 제외)
-        # ═══════════════════════════════════════════════════════════════
-        print("\n📋 Stage A: Landing Gate 판정 생성")
-        
-        # Pass 1: 리서치 + POV + red_team_review (final_report 없이)
-        print("\n🔍 Pass 1: 리서치 + POV + Landing Gate 판정...")
+        # Pass 1: 리서치 + 판정
+        print("\n🔍 Pass 1: 리서치 + Landing Gate 판정...")
         start_time_pass1 = time.time()
-        try:
-            crew_pass1, tracker = Step1CrewFactory().build_without_final_report(
-                include_revision=False, show_progress=True
-            )
-            if tracker:
-                tracker.print_header()
-                if tracker.task_order:
-                    tracker.on_task_start(tracker.task_order[0])
-            pass1_result = crew_pass1.kickoff(inputs=inputs)
-            if tracker:
-                tracker.print_summary()
-        except Exception as e:
-            print(f"❌ Pass 1 실행 오류: {e}", file=sys.stderr)
-            return 1
+        crew_pass1, tracker = Step1CrewFactory().build_without_final_report(
+            include_revision=False, show_progress=True
+        )
+        pass1_result = crew_pass1.kickoff(inputs=inputs)
         elapsed_pass1 = time.time() - start_time_pass1
         stage_times["Pass 1 (Research + Gate)"] = elapsed_pass1
         
-        # Pass 1 결과 저장 + metrics
         run_id_pass1 = f"{run_id}_pass1"
-        try:
-            _save_task_outputs(crew_pass1, out_dir=out_dir, run_id=run_id_pass1)
-            _log_usage_metrics(crew_pass1, out_dir=out_dir, run_id=run_id_pass1, elapsed_seconds=elapsed_pass1)
-            print(f"\n📁 Pass 1 결과 저장: {out_dir / 'runs' / run_id_pass1}")
-        except Exception as e:
-            print(f"⚠️ Pass 1 결과 저장 실패: {e}", file=sys.stderr)
+        _save_task_outputs(crew_pass1, out_dir=out_dir, run_id=run_id_pass1)
+        _log_usage_metrics(crew_pass1, out_dir=out_dir, run_id=run_id_pass1, elapsed_seconds=elapsed_pass1)
         
-        # Pass 1 verdict 추출
         verdict, _ = _extract_verdict_from_crew(crew_pass1, out_dir=out_dir, run_id=run_id_pass1)
-        print(f"\n🎯 Pass 1 Landing Gate Verdict: {verdict}")
-        
-        # 최종 verdict 추적 (Stage B에서 사용)
         final_verdict = verdict
         final_stage_run_id = run_id_pass1
-        metrics_saved = True
         
-        # Pass 2: HOLD면 revision 실행 (NO는 --revise-no 옵션 필요)
+        # Pass 2: Revision (필요시)
         do_revision = (verdict == "LANDING_HOLD") or (verdict == "LANDING_NO" and args.revise_no)
-        
-        if verdict == "LANDING_GO":
-            print("🟢 LANDING_GO! 리포트 생성으로 진행합니다.")
-        elif verdict == "LANDING_HOLD":
-            print("🟡 LANDING_HOLD! Revision을 실행합니다...")
-        elif verdict == "LANDING_NO":
-            if args.revise_no:
-                print("🔴 LANDING_NO + --revise-no 옵션. Revision을 시도합니다...")
-            else:
-                print("🔴 LANDING_NO! Revision 없이 리포트 생성으로 진행합니다.")
-                print("   (--revise-no 옵션으로 강제 revision 가능)")
-        else:
-            print("⚠️ VERDICT를 파싱할 수 없습니다. 리포트 생성으로 진행합니다.")
-        
         if do_revision:
-            # Pass 2: revision 실행 (revise + recheck만, final_report 없음)
-            print("\n🔧 Pass 2: Revision (revise → recheck)...")
-            
+            print(f"\n🔧 Pass 2: Revision ({verdict})...")
             pass1_outputs = _load_pass1_outputs_for_revision(out_dir, run_id_pass1)
+            revision_inputs = {**inputs, **pass1_outputs}
             
-            if not pass1_outputs.get("previous_positioning_output"):
-                print("   ⚠️ Pass 1 positioning 결과를 찾을 수 없음. Revision 건너뜀.")
-            else:
-                revision_inputs = {
-                    **inputs,
-                    **pass1_outputs,
-                }
-                
-                start_time_pass2 = time.time()
-                try:
-                    crew_pass2, tracker_v2 = Step1CrewFactory().build_revision_only(
-                        show_progress=True
-                    )
-                    if tracker_v2:
-                        tracker_v2.print_header()
-                        if tracker_v2.task_order:
-                            tracker_v2.on_task_start(tracker_v2.task_order[0])
-                    pass2_result = crew_pass2.kickoff(inputs=revision_inputs)
-                    if tracker_v2:
-                        tracker_v2.print_summary()
-                except Exception as e:
-                    print(f"❌ Pass 2 실행 오류: {e}", file=sys.stderr)
-                    return 1
-                
-                elapsed_pass2 = time.time() - start_time_pass2
-                stage_times["Pass 2 (Revision)"] = elapsed_pass2
-                
-                # Pass 2 결과 저장
-                run_id_pass2 = f"{run_id}_pass2"
-                try:
-                    _save_task_outputs(crew_pass2, out_dir=out_dir, run_id=run_id_pass2)
-                    _log_usage_metrics(crew_pass2, out_dir=out_dir, run_id=run_id_pass2, elapsed_seconds=elapsed_pass2)
-                    print(f"\n📁 Pass 2 결과 저장: {out_dir / 'runs' / run_id_pass2}")
-                except Exception as e:
-                    print(f"⚠️ Pass 2 결과 저장 실패: {e}", file=sys.stderr)
-                
-                # Pass 2 verdict 추출 (recheck 결과)
-                verdict_v2, _ = _extract_verdict_from_crew(crew_pass2, out_dir=out_dir, run_id=run_id_pass2)
-                print(f"\n🎯 Pass 2 Landing Gate Verdict: {verdict_v2}")
-                
-                if verdict_v2 in ["LANDING_HOLD", "LANDING_NO"]:
-                    print(f"⚠️ Revision 후에도 {verdict_v2}입니다.")
-                
-                # 최종 verdict 업데이트
-                final_verdict = verdict_v2 if verdict_v2 else verdict
-                final_stage_run_id = run_id_pass2
-        
-        # ═══════════════════════════════════════════════════════════════
-        # Stage B: 최종 리포트 생성 (verdict를 inputs로 주입)
-        # ═══════════════════════════════════════════════════════════════
-        print("\n" + "=" * 60)
-        print("📝 Stage B: 최종 리포트 생성")
-        print(f"   사용할 verdict: {final_verdict}")
-        
-        # Stage A 결과에서 필요한 데이터 로드
+            start_time_pass2 = time.time()
+            crew_pass2, _ = Step1CrewFactory().build_revision_only(show_progress=True)
+            pass2_result = crew_pass2.kickoff(inputs=revision_inputs)
+            elapsed_pass2 = time.time() - start_time_pass2
+            stage_times["Pass 2 (Revision)"] = elapsed_pass2
+            
+            run_id_pass2 = f"{run_id}_pass2"
+            _save_task_outputs(crew_pass2, out_dir=out_dir, run_id=run_id_pass2)
+            _log_usage_metrics(crew_pass2, out_dir=out_dir, run_id=run_id_pass2, elapsed_seconds=elapsed_pass2)
+            
+            verdict_v2, _ = _extract_verdict_from_crew(crew_pass2, out_dir=out_dir, run_id=run_id_pass2)
+            final_verdict = verdict_v2 if verdict_v2 else verdict
+            final_stage_run_id = run_id_pass2
+
+        # Stage B: 리포트 생성
+        print("\n📝 Stage B: 최종 리포트 생성...")
         stage_outputs = _load_pass1_outputs_for_revision(out_dir, final_stage_run_id)
-        
-        # inputs에 verdict와 데이터 주입
         report_inputs = {
             **inputs,
             "landing_gate_verdict": final_verdict,
-            "research_summary": stage_outputs.get("research_summary", ""),
-            "gap_hypotheses": stage_outputs.get("gap_hypotheses", ""),
-            "previous_positioning_output": stage_outputs.get("previous_positioning_output", ""),
-            "previous_red_team_output": stage_outputs.get("previous_red_team_output", ""),
+            **stage_outputs
         }
-        
         start_time_report = time.time()
-        try:
-            crew_report, _ = Step1CrewFactory().build_final_report_only(show_progress=True)
-            final_result = crew_report.kickoff(inputs=report_inputs)
-        except Exception as e:
-            print(f"❌ Stage B 실행 오류: {e}", file=sys.stderr)
-            return 1
-        
+        crew_report, _ = Step1CrewFactory().build_final_report_only(show_progress=True)
+        final_result = crew_report.kickoff(inputs=report_inputs)
         elapsed_report = time.time() - start_time_report
         stage_times["Stage B (Report)"] = elapsed_report
-        
         final_text = str(final_result)
         final_run_id = f"{run_id}_final"
-        
-        # 전체 실행 시간 계산
-        total_elapsed = time.time() - run_started_at
-        run_finished_at_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Stage B 결과 저장
-        try:
-            _save_task_outputs(crew_report, out_dir=out_dir, run_id=final_run_id)
-            _log_usage_metrics(crew_report, out_dir=out_dir, run_id=final_run_id, elapsed_seconds=elapsed_report)
-        except Exception as e:
-            print(f"⚠️ Stage B 결과 저장 실패: {e}", file=sys.stderr)
+        _save_task_outputs(crew_report, out_dir=out_dir, run_id=final_run_id)
+        _log_usage_metrics(crew_report, out_dir=out_dir, run_id=final_run_id, elapsed_seconds=elapsed_report)
     
     else:
-        # --auto-revise 없음: 2-stage 기본 실행
-        # Stage 1: research+pov+red_team (final_report 제외)
-        # Stage 2: verdict를 inputs로 넘겨 final_report만 실행
-        metrics_saved = False
-        
-        print("\n🚀 Stage 1: 리서치 + POV + Landing Gate 판정")
+        # Standard 2-stage
+        print("\n🚀 Stage 1: 리서치 + Landing Gate 판정...")
         start_time = time.time()
-        try:
-            crew_stage1, tracker = Step1CrewFactory().build_without_final_report(
-                include_revision=False, show_progress=True
-            )
-            if tracker:
-                tracker.print_header()
-                if tracker.task_order:
-                    tracker.on_task_start(tracker.task_order[0])
-            stage1_result = crew_stage1.kickoff(inputs=inputs)
-            if tracker:
-                tracker.print_summary()
-        except Exception as e:
-            print(f"❌ Stage 1 실행 오류: {e}", file=sys.stderr)
-            return 1
+        crew_stage1, _ = Step1CrewFactory().build_without_final_report(include_revision=False, show_progress=True)
+        stage1_result = crew_stage1.kickoff(inputs=inputs)
+        elapsed_time = time.time() - start_time
+        stage_times["Stage 1 (Research + Gate)"] = elapsed_time
         
-        # Stage 1 결과 저장
         stage1_run_id = f"{run_id}_stage1"
-        try:
-            _save_task_outputs(crew_stage1, out_dir=out_dir, run_id=stage1_run_id)
-            print(f"\n📁 Stage 1 결과 저장: {out_dir / 'runs' / stage1_run_id}")
-        except Exception as e:
-            print(f"⚠️ Stage 1 결과 저장 실패: {e}", file=sys.stderr)
+        _save_task_outputs(crew_stage1, out_dir=out_dir, run_id=stage1_run_id)
         
-        # Verdict 추출
         verdict, _ = _extract_verdict_from_crew(crew_stage1, out_dir=out_dir, run_id=stage1_run_id)
-        print(f"\n🎯 Landing Gate Verdict: {verdict}")
+        final_verdict = verdict
         
-        # Stage 2: Final Report 생성 (verdict를 inputs로 전달)
-        print("\n📝 Stage 2: 최종 리포트 생성")
-        
-        # Stage 1에서 저장된 리서치 요약과 빈틈 가설 로드
+        print("\n📝 Stage 2: 최종 리포트 생성...")
         stage1_outputs = _load_pass1_outputs_for_revision(out_dir, stage1_run_id)
-        
-        # inputs에 verdict와 요약 데이터 추가
         report_inputs = {
             **inputs,
             "landing_gate_verdict": verdict,
             "research_summary": stage1_outputs.get("research_summary", ""),
             "gap_hypotheses": stage1_outputs.get("gap_hypotheses", ""),
         }
-        
-        try:
-            crew_stage2, _ = Step1CrewFactory().build_final_report_only(show_progress=True)
-            final_result = crew_stage2.kickoff(inputs=report_inputs)
-        except Exception as e:
-            print(f"❌ Stage 2 실행 오류: {e}", file=sys.stderr)
-            return 1
-
-        elapsed_time = time.time() - start_time
+        crew_stage2, _ = Step1CrewFactory().build_final_report_only(show_progress=True)
+        final_result = crew_stage2.kickoff(inputs=report_inputs)
         final_text = str(final_result)
-        
-        # 전체 실행 시간 계산
-        total_elapsed = time.time() - run_started_at
-        run_finished_at_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        stage_times["Stage 1 (Research + Gate)"] = elapsed_time
-        
-        # Stage 2 결과도 저장
-        try:
-            _save_task_outputs(crew_stage2, out_dir=out_dir, run_id=run_id)
-            print(f"\n✅ Per-task outputs saved under: {out_dir / 'runs' / run_id}")
-        except Exception as e:
-            print(f"⚠️ Failed to save per-task outputs: {e}", file=sys.stderr)
+        _save_task_outputs(crew_stage2, out_dir=out_dir, run_id=run_id)
 
-    # 7) 토큰 사용량/비용 로깅 (auto-revise에서는 이미 pass별로 저장됨)
-    metrics: Dict[str, Any] = {}
-    if not args.auto_revise:
-        try:
-            metrics = _log_usage_metrics(crew, out_dir=out_dir, run_id=run_id, elapsed_seconds=elapsed_time)
-        except Exception as e:
-            print(f"⚠️ Failed to log usage metrics: {e}", file=sys.stderr)
-    else:
-        # auto-revise 모드: 저장된 마지막 metrics 파일에서 읽기
-        try:
-            last_metrics_path = out_dir / "runs" / final_run_id / "_usage_metrics.json"
-            if last_metrics_path.exists():
-                metrics = json.loads(last_metrics_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    # 6) 결과 정리 및 저장
+    total_elapsed = time.time() - run_started_at
+    run_finished_at_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Metrics 로드 (마지막 실행 단계 기준)
+    metrics = {}
+    try:
+        final_metrics_run_id = f"{run_id}_final" if args.auto_revise else run_id
+        metrics_path = out_dir / "runs" / final_metrics_run_id / "_usage_metrics.json"
+        if metrics_path.exists():
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except Exception: pass
 
-    # 8) 최종 리포트 저장/출력 (메타 정보 헤더 + 실행 통계 푸터)
-    # final_verdict 결정 (auto-revise: 이미 있음, 그 외: verdict 변수 사용)
-    if not args.auto_revise:
-        final_verdict = verdict
-    
-    # run_finished_at_iso가 설정되지 않은 경우 지금 시간 사용
-    if not run_finished_at_iso:
-        total_elapsed = time.time() - run_started_at
-        run_finished_at_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     report_header = _generate_report_header(
-        inputs=inputs, 
-        run_id=run_id, 
-        args=args,
-        run_started_at=run_started_at_iso,
-        run_finished_at=run_finished_at_iso,
-        total_elapsed=total_elapsed,
-        stage_times=stage_times,
-        final_verdict=final_verdict
+        inputs=inputs, run_id=run_id, args=args,
+        run_started_at=run_started_at_iso, run_finished_at=run_finished_at_iso,
+        total_elapsed=total_elapsed, stage_times=stage_times, final_verdict=final_verdict
     )
     report_footer = _generate_report_footer(metrics) if metrics else ""
     
-    # ═══════════════════════════════════════════════════════════════
-    # LLM 본문 안전장치 (운영급 검증)
-    # ═══════════════════════════════════════════════════════════════
-    safety_violations = []
-    
-    # 안전장치 1: 시간/통계 패턴 탐지
-    forbidden_time_patterns = [
-        (r'\d+\s*분\s*\d*\s*초', "시간(분초)"),
-        (r'\d+\s*분(?!\s*석)', "시간(분)"),
-        (r'(?<!\d)\d+\s*초', "시간(초)"),
-        (r'총\s*토큰', "토큰"),
-        (r'총\s*실행\s*시간', "실행시간"),
-    ]
-    for pattern, desc in forbidden_time_patterns:
-        if re.search(pattern, final_text):
-            safety_violations.append(f"시간/통계 패턴({desc})")
-    
-    # 안전장치 2: VERDICT/이모지 불일치 탐지
-    emoji_map = {"LANDING_GO": "🟢", "LANDING_HOLD": "🟡", "LANDING_NO": "🔴"}
-    correct_emoji = emoji_map.get(final_verdict, "")
-    for verdict_type, emoji in emoji_map.items():
-        if verdict_type != final_verdict and emoji in final_text:
-            safety_violations.append(f"잘못된 이모지({emoji}, 정답은 {correct_emoji})")
-    
-    # 안전장치 3: 본문에서 verdict 재선언 탐지
-    verdict_redeclaration_patterns = [
-        r'VERDICT\s*:\s*LANDING',  # "VERDICT: LANDING_GO"
-        r'최종\s*판정\s*[:：]?\s*(LANDING|🟢|🟡|🔴)',  # "최종 판정: LANDING_GO"
-        r'Landing\s*Gate\s*결과\s*[:：]?\s*(GO|HOLD|NO)',  # "Landing Gate 결과: GO"
-    ]
-    for pattern in verdict_redeclaration_patterns:
-        if re.search(pattern, final_text, re.IGNORECASE):
-            safety_violations.append("본문에서 verdict 재선언")
-    
-    # 안전장치 4: 코드 전용 섹션 헤더가 본문에 나오면 자동 제거
+    # 본문 클리닝 (중복 섹션 제거 등)
     code_only_headers = [
-        (r'##\s*⏱️\s*실행\s*정보.*?(?=\n##|\n---|\Z)', "실행 정보"),
-        (r'##\s*🧩\s*검증\s*대상\s*아이디어.*?(?=\n##|\n---|\Z)', "Idea Anchor"),
-        (r'##\s*🚦\s*Landing\s*Gate\s*결과\s*요약.*?(?=\n##|\n---|\Z)', "Gate 요약"),
-        (r'##\s*📊\s*토큰/비용\s*통계.*?(?=\n##|\n---|\Z)', "토큰/비용"),
-        (r'##\s*📊\s*실행\s*통계.*?(?=\n##|\n---|\Z)', "실행 통계"),
+        r'##\s*⏱️\s*실행\s*정보.*?(?=\n##|\n---|\Z)',
+        r'##\s*🧩\s*검증\s*대상\s*아이디어.*?(?=\n##|\n---|\Z)',
+        r'##\s*🚦\s*Landing\s*Gate\s*결과\s*요약.*?(?=\n##|\n---|\Z)',
+        r'##\s*📊\s*토큰/비용\s*통계.*?(?=\n##|\n---|\Z)',
     ]
-    sections_removed = []
-    for pattern, desc in code_only_headers:
-        if re.search(pattern, final_text, re.DOTALL):
-            final_text = re.sub(pattern, '', final_text, flags=re.DOTALL)
-            sections_removed.append(desc)
+    for pattern in code_only_headers:
+        final_text = re.sub(pattern, '', final_text, flags=re.DOTALL)
     
-    if sections_removed:
-        safety_violations.append(f"중복 섹션 자동 제거: {', '.join(sections_removed)}")
+    final_report = report_header + final_text + report_footer
     
-    # 결과 출력 (중복 섹션 제거는 정보 레벨, 나머지는 경고)
-    if safety_violations:
-        # 중복 섹션 제거만 있으면 정보 레벨
-        only_removed = all("자동 제거" in v for v in safety_violations)
-        
-        if only_removed:
-            print(f"\n📋 [LLM 본문 정리] 중복 섹션 제거됨: {', '.join(sections_removed)}", file=sys.stderr)
-        else:
-            print(f"\n{'='*60}", file=sys.stderr)
-            print("⚠️ [LLM 본문 안전 검사 경고]", file=sys.stderr)
-            print(f"{'='*60}", file=sys.stderr)
-            for i, v in enumerate(safety_violations, 1):
-                print(f"  {i}. {v}", file=sys.stderr)
-            print(f"\n   → header/footer의 코드 주입 값이 정확한 값입니다", file=sys.stderr)
-            print(f"{'='*60}\n", file=sys.stderr)
-    
-    final_text_with_header = report_header + final_text + report_footer
-    
-    # 리포트 저장 (지정된 경로 또는 reports/ 폴더)
     if args.out:
         out_path = Path(args.out)
     else:
-        # 기본: outputs/reports/ 폴더에 저장
         reports_dir = out_dir / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         out_path = reports_dir / f"{run_id}_report.md"
     
-    _safe_write_text(out_path, final_text_with_header)
-    print(f"\n✅ Final report saved to: {out_path}")
+    _safe_write_text(out_path, final_report)
+    print(f"\n✅ Final report saved: {out_path}")
 
-    # 9) 후속 대화 모드 (--chat)
+    # 후속 대화 모드
     if args.chat:
         _start_report_chat(final_text, inputs)
 

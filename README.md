@@ -112,6 +112,40 @@ SERPER_API_KEY=xxxxxxxxxxxxx
 
 ---
 
+## 🌐 웹 서비스로 사용하기 (NEW!)
+
+CLI 외에도 **웹 UI**로 Gap Foundry를 사용할 수 있습니다.
+
+### 1. 백엔드 API 서버 실행
+
+```bash
+cd gap_foundry
+uvicorn gap_foundry.api:app --reload --host 0.0.0.0 --port 8000
+```
+
+API 문서: http://localhost:8000/docs
+
+### 2. 프론트엔드 실행
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+브라우저에서 http://localhost:3000 접속!
+
+### 웹 UI 기능
+
+- ✅ **실시간 PreGate 피드백**: 입력하면서 즉시 구체성 검사
+- ✅ **진행 상태 실시간 업데이트**: SSE로 분석 진행률 표시
+- ✅ **결과 대시보드**: GO/HOLD/NO 판정 + 전체 리포트 렌더링
+- ✅ **리포트 다운로드**: Markdown 파일로 저장
+
+![Gap Foundry Web UI](./docs/web-ui-preview.png)
+
+---
+
 ## 📖 사용법
 
 ### 🔰 가장 쉬운 방법: 대화형 인터뷰
